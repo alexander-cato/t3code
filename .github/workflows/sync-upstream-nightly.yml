@@ -23,6 +23,7 @@ jobs:
       - name: Merge the latest published upstream nightly
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         with:
+          github-token: ${{ secrets.UPSTREAM_SYNC_TOKEN || github.token }}
           script: |
             const base = context.payload.repository.default_branch;
             if (!base || context.ref !== `refs/heads/${base}`) {
@@ -56,6 +57,9 @@ jobs:
                 commit_message: `chore: sync upstream ${nightly.tag_name}`,
               });
             } catch (error) {
+              if (error.status === 403) {
+                throw new Error('GitHub denied the merge. Set UPSTREAM_SYNC_TOKEN to a token scoped to this fork with Contents and Workflows write permissions.', { cause: error });
+              }
               if (error.status === 409) {
                 throw new Error(`Cannot merge ${nightly.tag_name} into ${base}. Resolve the conflicts manually, then rerun this workflow.`, { cause: error });
               }

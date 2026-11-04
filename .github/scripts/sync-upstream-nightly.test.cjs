@@ -119,8 +119,14 @@ test("refuses manual runs from feature branches before accessing GitHub", async 
   assert.equal(calls.length, 0);
 });
 
-test("propagates permission and API errors without a fallback update", async () => {
+test("explains which token permissions are needed when GitHub denies the merge", async () => {
   const mergeError = Object.assign(new Error("Forbidden"), { status: 403 });
+  const { run } = fixture({ mergeError });
+  await assert.rejects(run(), /UPSTREAM_SYNC_TOKEN.*Contents.*Workflows/);
+});
+
+test("propagates API errors without a fallback update", async () => {
+  const mergeError = Object.assign(new Error("GitHub unavailable"), { status: 503 });
   const { run } = fixture({ mergeError });
   await assert.rejects(run(), (error) => error === mergeError);
 });
