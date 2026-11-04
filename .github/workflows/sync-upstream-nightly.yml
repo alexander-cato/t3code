@@ -1,0 +1,70 @@
+name: Sync upstream nightly
+
+on:
+  schedule:
+    - cron: "17,47 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-upstream-nightly
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.repository == 'alexander-cato/t3code'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Merge the latest published upstream nightly
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const base = context.payload.repository.default_branch;
+            if (!base || context.ref !== `refs/heads/${base}`) {
+              throw new Error('Nightly sync must run from the fork default branch.');
+            }
+
+            const upstream = { owner: 'pingdotgg', repo: 't3code' };
+            const releases = await github.paginate(github.rest.repos.listReleases, {
+              ...upstream,
+              per_page: 100,
+            });
+            const nightly = releases
+              .filter((release) =>
+                !release.draft && release.published_at &&
+                /^v\d+\.\d+\.\d+-nightly\.\d{8}\.\d+$/.test(release.tag_name))
+              .sort((a, b) => Date.parse(b.published_at) - Date.parse(a.published_at))[0];
+            if (!nightly) {
+              throw new Error('No published upstream nightly found.');
+            }
+
+            const { data: commit } = await github.rest.repos.getCommit({
+              ...upstream,
+              ref: nightly.tag_name,
+            });
+            let result;
+            try {
+              result = await github.rest.repos.merge({
+                ...context.repo,
+                base,
+                head: commit.sha,
+                commit_message: `chore: sync upstream ${nightly.tag_name}`,
+              });
+            } catch (error) {
+              if (error.status === 409) {
+                throw new Error(`Cannot merge ${nightly.tag_name} into ${base}. Resolve the conflicts manually, then rerun this workflow.`, { cause: error });
+              }
+              throw error;
+            }
+
+            const outcome = result.status === 204 ? 'Already contains' : 'Merged';
+            core.info(`${outcome} ${nightly.tag_name} (${commit.sha}) in ${base}.`);
+            await core.summary
+              .addHeading('Upstream nightly sync')
+              .addRaw(`${outcome} [${nightly.tag_name}](https://github.com/pingdotgg/t3code/releases/tag/${nightly.tag_name}) (${commit.sha}) in ${base}.`)
+              .write();
