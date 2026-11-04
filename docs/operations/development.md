@@ -121,8 +121,11 @@ the workflow in GitHub Actions to stop syncing. GitHub may disable schedules aft
 repository inactivity; re-enable the workflow there if needed.
 
 This updates repository source only. It does not build or install the fork, update feature
-branches or local checkouts, or publish app releases. Updates use `GITHUB_TOKEN`, so the sync
-does not trigger other push workflows. No personal access token is required.
+branches or local checkouts, or publish app releases. The built-in `GITHUB_TOKEN` cannot merge
+updates that change workflow files. For those updates, set the `UPSTREAM_SYNC_TOKEN` Actions secret
+to a fine-grained personal access token limited to this fork, with **Contents: read and write** and
+**Workflows: read and write** permissions. Renew the secret when the token expires. Push workflows
+can run when the sync uses this token; merges using the built-in token do not trigger them.
 
 ## Checks
 
