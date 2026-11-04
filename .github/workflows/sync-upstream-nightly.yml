@@ -25,10 +25,11 @@ jobs:
         with:
           github-token: ${{ secrets.UPSTREAM_SYNC_TOKEN || github.token }}
           script: |
-            const base = context.payload.repository.default_branch;
-            if (!base || context.ref !== `refs/heads/${base}`) {
+            const defaultBranch = context.payload.repository.default_branch;
+            if (!defaultBranch || context.ref !== `refs/heads/${defaultBranch}`) {
               throw new Error('Nightly sync must run from the fork default branch.');
             }
+            const base = 'fork/nightly';
 
             const upstream = { owner: 'pingdotgg', repo: 't3code' };
             const releases = await github.paginate(github.rest.repos.listReleases, {

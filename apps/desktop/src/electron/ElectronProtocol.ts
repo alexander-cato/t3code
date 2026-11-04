@@ -11,12 +11,14 @@ import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 
 import * as Electron from "electron";
+import { desktopForkIdentity, isDesktopForkBuild } from "../forkIdentity.ts";
 
 export const DESKTOP_HOST = "app";
 const DESKTOP_PRODUCTION_SCHEME = "t3code";
 const DESKTOP_DEVELOPMENT_SCHEME = "t3code-dev";
 
-export function getDesktopScheme(isDevelopment: boolean): string {
+export function getDesktopScheme(isDevelopment: boolean, fork = isDesktopForkBuild): string {
+  if (fork) return desktopForkIdentity.scheme;
   return isDevelopment ? DESKTOP_DEVELOPMENT_SCHEME : DESKTOP_PRODUCTION_SCHEME;
 }
 

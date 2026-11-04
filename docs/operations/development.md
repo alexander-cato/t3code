@@ -190,21 +190,42 @@ for the security model.
 ## Fork nightly sync
 
 `alexander-cato/t3code` uses [Sync upstream nightly](../../.github/workflows/sync-upstream-nightly.yml)
-to merge the latest published `pingdotgg/t3code` nightly into its default branch. It checks every
+to merge the latest published `pingdotgg/t3code` nightly into `fork/nightly`. It checks every
 30 minutes and can also run manually from the default branch in GitHub Actions. It follows the
-release tag's commit, so unpublished changes on upstream `main` are excluded.
+release tag's commit, so unpublished changes on upstream `main` are excluded. Merge custom app
+changes into `fork/nightly` to keep them in future installers.
 
 Fork commits are preserved. A merge conflict fails the run without changing the branch; resolve
 it manually and rerun the workflow. The run summary records the nightly tag and commit. Disable
 the workflow in GitHub Actions to stop syncing. GitHub may disable schedules after 60 days of
 repository inactivity; re-enable the workflow there if needed.
 
-This updates repository source only. It does not build or install the fork, update feature
-branches or local checkouts, or publish app releases. The built-in `GITHUB_TOKEN` cannot merge
-updates that change workflow files. For those updates, set the `UPSTREAM_SYNC_TOKEN` Actions secret
+The built-in `GITHUB_TOKEN` cannot merge updates that change workflow files. Set the
+`UPSTREAM_SYNC_TOKEN` Actions secret
 to a fine-grained personal access token limited to this fork, with **Contents: read and write** and
 **Workflows: read and write** permissions. Renew the secret when the token expires. Push workflows
 can run when the sync uses this token; merges using the built-in token do not trigger them.
+
+[Fork nightly desktop](../../.github/workflows/fork-nightly-desktop.yml) builds macOS Apple Silicon
+installers after successful syncs, skipping commits already released. It can also run manually
+from the default branch and always builds `fork/nightly`. Enable **force** to rebuild the same
+commit after configuring signing. It uses standard GitHub-hosted runners.
+
+Fork builds use `T3CODE_DESKTOP_FORK=true`. They install as **T3 Code Fork (Nightly)** with their own
+app ID, `t3code-fork:` links, Chromium profile, updater cache, and `~/.t3-fork` home. They do not
+import the official app's credentials or data. Install the fork DMG alongside the existing Nightly
+app; each app keeps its own sessions. The fork's update feed points only at this fork's releases.
+
+For automatic app updates, configure the Actions secrets `CSC_LINK`, `CSC_KEY_PASSWORD`,
+`APPLE_API_KEY`, `APPLE_API_KEY_ID`, `APPLE_API_ISSUER`, and `MACOS_PROVISIONING_PROFILE`, plus the
+`APPLE_TEAM_ID` repository variable. The certificate, profile and associated domains must belong to
+your Apple team and the fork's `com.alexandercato.t3code.fork` app ID. See the signing steps in
+[the desktop build workflow](../../.github/workflows/release-desktop.yml). Install the first signed
+fork build manually; subsequent signed fork builds use its nightly updater.
+
+Without signing configured, manual builds produce a draft GitHub Release with an unsigned DMG and
+ZIP for manual installation. These builds have no update feed and are never published to the
+updater. Automatic app builds wait for signing credentials; source syncing remains independent.
 
 ## Checks
 
