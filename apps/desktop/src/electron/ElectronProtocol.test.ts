@@ -21,6 +21,10 @@ import * as ElectronProtocol from "./ElectronProtocol.ts";
 const layerProtocol = ElectronProtocol.layer.pipe(Layer.provide(NodeServices.layer));
 
 describe("ElectronProtocol", () => {
+  it("gives the fork its own protocol without claiming the installed nightly scheme", () => {
+    assert.equal(ElectronProtocol.getDesktopScheme(false, true), "t3code-fork");
+    assert.equal(ElectronProtocol.getDesktopScheme(false, false), "t3code");
+  });
   beforeEach(() => {
     handleMock.mockReset();
     netFetchMock.mockReset();

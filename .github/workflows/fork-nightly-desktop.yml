@@ -1,0 +1,217 @@
+name: Fork nightly desktop
+
+on:
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Build again even when this commit already has a release
+        type: boolean
+        default: false
+  workflow_run:
+    workflows: [Sync upstream nightly]
+    types: [completed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-nightly-desktop
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    if: >-
+      github.repository == 'alexander-cato/t3code' &&
+      (github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == github.event.repository.default_branch))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      build: ${{ steps.resolve.outputs.build }}
+      ref: ${{ steps.resolve.outputs.ref }}
+      version: ${{ steps.resolve.outputs.version }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      signed: ${{ steps.signing.outputs.signed }}
+      clerk_publishable_key: ${{ steps.resolve.outputs.clerk_publishable_key }}
+      clerk_jwt_template: ${{ steps.resolve.outputs.clerk_jwt_template }}
+      clerk_cli_oauth_client_id: ${{ steps.resolve.outputs.clerk_cli_oauth_client_id }}
+      relay_url: ${{ steps.resolve.outputs.relay_url }}
+    steps:
+      - id: resolve
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          FORCE_BUILD: ${{ inputs.force }}
+        with:
+          script: |
+            if (context.ref !== `refs/heads/${context.payload.repository.default_branch}`) {
+              throw new Error('Dispatch the fork build from the default branch; it always builds fork/nightly.');
+            }
+            const { data: branch } = await github.rest.repos.getBranch({ ...context.repo, branch: 'fork/nightly' });
+            const ref = branch.commit.sha;
+            const releases = await github.paginate(github.rest.repos.listReleases, { ...context.repo, per_page: 100 });
+            const latest = releases
+              .filter((release) => !release.draft && release.published_at && /^v\d+\.\d+\.\d+-nightly\.\d{8}\.\d+$/.test(release.tag_name))
+              .sort((a, b) => Date.parse(b.published_at) - Date.parse(a.published_at))[0];
+            if (latest && process.env.FORCE_BUILD !== 'true') {
+              const { data: previous } = await github.rest.repos.getCommit({ ...context.repo, ref: latest.tag_name });
+              if (previous.sha === ref) {
+                core.info('This fork commit already has a nightly release.');
+                core.setOutput('build', 'false');
+                return;
+              }
+            }
+            const readFile = async (path) => {
+              const { data } = await github.rest.repos.getContent({ ...context.repo, path, ref });
+              return Buffer.from(data.content, 'base64').toString('utf8');
+            };
+            const base = JSON.parse(await readFile('apps/desktop/package.json')).version;
+            const parts = /^(\d+)\.(\d+)\.(\d+)$/.exec(base);
+            if (!parts) throw new Error(`Expected a stable package version, got ${base}.`);
+            const date = new Date().toISOString().slice(0, 10).replaceAll('-', '');
+            const version = `${parts[1]}.${parts[2]}.${Number(parts[3]) + 1}-nightly.${date}.${context.runNumber}`;
+            core.setOutput('ref', ref);
+            core.setOutput('version', version);
+            core.setOutput('tag', `v${version}`);
+            const config = await readFile('.env.example');
+            for (const [output, name] of Object.entries({
+              clerk_publishable_key: 'T3CODE_CLERK_PUBLISHABLE_KEY',
+              clerk_jwt_template: 'T3CODE_CLERK_JWT_TEMPLATE',
+              clerk_cli_oauth_client_id: 'T3CODE_CLERK_CLI_OAUTH_CLIENT_ID',
+              relay_url: 'T3CODE_RELAY_URL',
+            })) {
+              const value = config.split('\n').find((line) => line.startsWith(`${name}=`))?.slice(name.length + 1).trim();
+              if (!value || !/^[A-Za-z0-9._:/-]+$/.test(value)) throw new Error(`Missing or malformed ${name}.`);
+              core.setOutput(output, value);
+            }
+            core.setOutput('build', 'true');
+      - id: signing
+        name: Check signing availability
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+          MACOS_PROVISIONING_PROFILE: ${{ secrets.MACOS_PROVISIONING_PROFILE }}
+        run: |
+          for key in CSC_LINK CSC_KEY_PASSWORD APPLE_API_KEY APPLE_API_KEY_ID APPLE_API_ISSUER APPLE_TEAM_ID MACOS_PROVISIONING_PROFILE; do
+            if [[ -z "${!key}" ]]; then
+              echo "signed=false" >> "$GITHUB_OUTPUT"
+              echo "Signing is not configured; this build is for manual installation and has no auto-update feed."
+              exit 0
+            fi
+          done
+          echo "signed=true" >> "$GITHUB_OUTPUT"
+
+  bundle:
+    needs: resolve
+    if: >-
+      needs.resolve.outputs.build == 'true' &&
+      (needs.resolve.outputs.signed == 'true' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      T3CODE_DESKTOP_FORK: "true"
+      T3CODE_TELEMETRY_CHANNEL: dev
+    steps:
+      - name: Checkout fork commit
+        env:
+          CHECKOUT_REF: ${{ needs.resolve.outputs.ref }}
+        run: |
+          set -euo pipefail
+          git init .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git fetch --no-tags --depth=1 origin "$CHECKOUT_REF"
+          git sparse-checkout set --no-cone '/*' '!/.repos/'
+          git checkout --detach FETCH_HEAD
+      - uses: ./.github/actions/setup-ci-deps
+        with:
+          install-args: --filter=t3... --filter=@t3tools/web... --filter=@t3tools/desktop... --filter=@t3tools/scripts...
+      - name: Configure fork build
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          node scripts/update-release-package-versions.ts "$VERSION"
+          cp .env.example .env
+      - uses: ./.github/actions/setup-apt-mirrors
+      - name: Install native build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libsecret-1-dev pkg-config
+      - name: Build fork desktop bundle
+        run: vp run build:desktop
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: js-bundle
+          path: |
+            apps/server/dist
+            apps/desktop/dist-electron
+          if-no-files-found: error
+          retention-days: 1
+
+  desktop:
+    needs: [resolve, bundle]
+    permissions:
+      actions: read
+      contents: read
+    uses: ./.github/workflows/release-desktop.yml
+    secrets: inherit
+    with:
+      desktop_fork: true
+      label: Fork macOS arm64
+      runner: macos-26
+      platform: mac
+      target: dmg
+      arch: arm64
+      rust_target: aarch64-apple-darwin
+      resource_key: darwin-arm64
+      ref: ${{ needs.resolve.outputs.ref }}
+      version: ${{ needs.resolve.outputs.version }}
+      release_channel: nightly
+      relay_client_tracing: false
+      clerk_publishable_key: ${{ needs.resolve.outputs.clerk_publishable_key }}
+      clerk_jwt_template: ${{ needs.resolve.outputs.clerk_jwt_template }}
+      clerk_cli_oauth_client_id: ${{ needs.resolve.outputs.clerk_cli_oauth_client_id }}
+      relay_url: ${{ needs.resolve.outputs.relay_url }}
+
+  publish:
+    needs: [resolve, desktop]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.resolve.outputs.version }}
+      TAG: ${{ needs.resolve.outputs.tag }}
+      REF: ${{ needs.resolve.outputs.ref }}
+      SIGNED: ${{ needs.resolve.outputs.signed }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: desktop-mac-arm64
+          path: assets
+      - name: Publish fork installer
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          dmgs=(assets/T3-Code-Fork-*.dmg)
+          zips=(assets/T3-Code-Fork-*.zip)
+          assets=(assets/T3-Code-Fork-*.dmg assets/T3-Code-Fork-*.zip assets/T3-Code-Fork-*.blockmap)
+          if [[ ${#dmgs[@]} -ne 1 || ${#zips[@]} -ne 1 ]]; then
+            echo "Missing fork DMG or ZIP." >&2
+            exit 1
+          fi
+          if [[ "$SIGNED" == true ]]; then
+            test -s assets/nightly-mac.yml
+            assets+=(assets/nightly-mac.yml)
+          fi
+          printf '%s\n\n' "Fork source: https://github.com/$GITHUB_REPOSITORY/tree/$REF" > "$RUNNER_TEMP/notes.md"
+          if [[ "$SIGNED" != true ]]; then
+            printf '%s\n' 'Unsigned fork build for manual installation. Automatic app updates require signing credentials and a signed fork install.' >> "$RUNNER_TEMP/notes.md"
+          fi
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$REF" --draft --prerelease --title "T3 Code Fork $VERSION" --notes-file "$RUNNER_TEMP/notes.md"
+          gh release upload "$TAG" "${assets[@]}" --repo "$GITHUB_REPOSITORY"
+          if [[ "$SIGNED" == true ]]; then
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease --latest=false
+          fi
