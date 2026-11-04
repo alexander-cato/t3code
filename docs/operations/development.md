@@ -108,6 +108,22 @@ startup and keeps its own SQLite data, signing key, and revocation state. Deskto
 servers ignore the value. See [environment authentication](../internals/environment-auth.md#reusable-dev-credential)
 for the security model.
 
+## Fork nightly sync
+
+`alexander-cato/t3code` uses [Sync upstream nightly](../../.github/workflows/sync-upstream-nightly.yml)
+to merge the latest published `pingdotgg/t3code` nightly into its default branch. It checks every
+30 minutes and can also run manually from the default branch in GitHub Actions. It follows the
+release tag's commit, so unpublished changes on upstream `main` are excluded.
+
+Fork commits are preserved. A merge conflict fails the run without changing the branch; resolve
+it manually and rerun the workflow. The run summary records the nightly tag and commit. Disable
+the workflow in GitHub Actions to stop syncing. GitHub may disable schedules after 60 days of
+repository inactivity; re-enable the workflow there if needed.
+
+This updates repository source only. It does not build or install the fork, update feature
+branches or local checkouts, or publish app releases. Updates use `GITHUB_TOKEN`, so the sync
+does not trigger other push workflows. No personal access token is required.
+
 ## Checks
 
 `vp run check:changed` runs CI's fast checks for your branch's changes: format and lint of the
