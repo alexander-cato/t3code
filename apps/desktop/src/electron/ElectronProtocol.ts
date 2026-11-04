@@ -109,11 +109,10 @@ function withContentSecurityPolicy(response: Response, policy: string): Response
   });
 }
 
-// Must run synchronously before Electron emits ready.
-function registerDesktopSchemePrivilegesSync(): void {
-  Electron.protocol.registerSchemesAsPrivileged([
+export function resolveDesktopSchemePrivileges(fork = isDesktopForkBuild) {
+  return [
     {
-      scheme: DESKTOP_PRODUCTION_SCHEME,
+      scheme: getDesktopScheme(false, fork),
       privileges: {
         standard: true,
         secure: true,
@@ -134,7 +133,12 @@ function registerDesktopSchemePrivilegesSync(): void {
         stream: true,
       },
     },
-  ]);
+  ];
+}
+
+// Must run synchronously before Electron emits ready.
+function registerDesktopSchemePrivilegesSync(): void {
+  Electron.protocol.registerSchemesAsPrivileged(resolveDesktopSchemePrivileges());
 }
 
 const registerDesktopSchemePrivileges = Effect.sync(registerDesktopSchemePrivilegesSync).pipe(

@@ -24,6 +24,10 @@ describe("ElectronProtocol", () => {
   it("gives the fork its own protocol without claiming the installed nightly scheme", () => {
     assert.equal(ElectronProtocol.getDesktopScheme(false, true), "t3code-fork");
     assert.equal(ElectronProtocol.getDesktopScheme(false, false), "t3code");
+    assert.deepEqual(
+      ElectronProtocol.resolveDesktopSchemePrivileges(true).map(({ scheme }) => scheme),
+      ["t3code-fork", "t3code-dev"],
+    );
   });
   beforeEach(() => {
     handleMock.mockReset();
