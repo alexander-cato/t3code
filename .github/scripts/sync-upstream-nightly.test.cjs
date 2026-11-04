@@ -86,7 +86,7 @@ test("merges the newest published nightly tag's exact commit into the fork", asy
       {
         owner: "alexander-cato",
         repo: "t3code",
-        base: "main",
+        base: "fork/nightly",
         head: "nightly-commit",
         commit_message: `chore: sync upstream ${nightly.tag_name}`,
       },
