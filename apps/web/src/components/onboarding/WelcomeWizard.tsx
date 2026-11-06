@@ -1,3 +1,4 @@
+import { Link } from "@tanstack/react-router";
 import { useAuth } from "@clerk/react";
 import { useAtomValue } from "@effect/atom-react";
 import type {
@@ -261,6 +262,13 @@ export function WelcomeWizard({
         </WizardHeader>
 
         <WizardPanel holdHeight={isLoadingProjects}>
+          {step === "connection" &&
+          window.desktopBridge?.getInstallationDataState &&
+          window.desktopBridge.getAppBranding()?.baseName === "T3 Code Fork" ? (
+            <Button variant="link" render={<Link to="/settings/connections" />}>
+              Import or connect an existing T3 installation
+            </Button>
+          ) : null}
           {step === "connection" ? (
             <ConnectionStep
               expandPairingInitially={!localAvailable && !hasCloudPublicConfig()}

@@ -218,9 +218,10 @@ from the default branch and always builds `fork/nightly`. Enable **force** to re
 commit after configuring signing. It uses standard GitHub-hosted runners.
 
 Fork builds use `T3CODE_DESKTOP_FORK=true`. They install as **T3 Code Fork (Nightly)** with their own
-app ID, `t3code-fork:` links, Chromium profile, updater cache, and `~/.t3-fork` home. They do not
-import the official app's credentials or data. Install the fork DMG alongside the existing Nightly
-app; each app keeps its own sessions. The fork's update feed points only at this fork's releases.
+app ID, `t3code-fork:` links, Chromium profile, updater cache, and `~/.t3-fork` home. Data import is opt-in under **Settings → Environments → Existing T3 installations**.
+Use **Import and restart** for an independent copy with rollback, or **Keep connected** to use the
+same running environment from both apps. App profiles and permissions remain separate. Install the
+fork DMG alongside the existing Nightly app. The fork's update feed points only at this fork's releases.
 
 For automatic app updates, configure the Actions secrets `CSC_LINK`, `CSC_KEY_PASSWORD`,
 `APPLE_API_KEY`, `APPLE_API_KEY_ID`, `APPLE_API_ISSUER`, and `MACOS_PROVISIONING_PROFILE`, plus the
