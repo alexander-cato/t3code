@@ -12,7 +12,9 @@ In T3 Code Fork, open **Settings → Environments → Existing T3 installations*
   portable saved secrets, provider settings, and app preferences. Close the source app and let
   unfinished agent work settle first. Select its T3 home or `userdata` folder, then choose
   **Import and restart**. The fork keeps its own app identity and connection credentials.
-  Imported scheduled tasks start paused; enable the ones you want in Scheduled tasks.
+  Imported scheduled tasks and automatic thread resumes start disabled. Enable the ones you
+  want in Scheduled tasks and Settings after importing. Stop active PR watches and thread
+  recovery before importing, or use Keep connected to share them without making a copy.
   **Restore previous fork data** reverses an import and keeps a backup of the current data.
 - **Keep connected** uses one running environment from both apps. Create a pairing link in the
   host's **Sharing & access** settings and use **Connect existing environment** in the other app.
