@@ -200,11 +200,12 @@ it manually and rerun the workflow. The run summary records the nightly tag and 
 the workflow in GitHub Actions to stop syncing. GitHub may disable schedules after 60 days of
 repository inactivity; re-enable the workflow there if needed.
 
-The built-in `GITHUB_TOKEN` cannot merge updates that change workflow files. Set the
-`UPSTREAM_SYNC_TOKEN` Actions secret
-to a fine-grained personal access token limited to this fork, with **Contents: read and write** and
-**Workflows: read and write** permissions. Renew the secret when the token expires. Push workflows
-can run when the sync uses this token; merges using the built-in token do not trigger them.
+The sync uses GitHub Actions' built-in token with Contents write permission; no personal token is
+needed. It preserves the fork's entire `.github/workflows/` directory, including workflows upstream
+adds or removes. Upstream source changes and merge ancestry are retained, but upstream workflow
+updates must be reviewed and applied separately. The workflow executes its sync script from the
+trusted default-branch commit, not from the upstream code it just merged. Pushes made with the
+built-in token do not start other push workflows; the fork build follows the sync's completion.
 
 [Fork nightly desktop](../../.github/workflows/fork-nightly-desktop.yml) builds macOS Apple Silicon
 installers after successful syncs, skipping commits already released. It can also run manually

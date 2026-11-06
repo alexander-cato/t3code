@@ -1,14 +1,27 @@
 const assert = require("node:assert/strict");
-const { readFileSync } = require("node:fs");
-const { join } = require("node:path");
+const { spawnSync } = require("node:child_process");
+const {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} = require("node:fs");
+const { tmpdir } = require("node:os");
+const { dirname, join } = require("node:path");
 const test = require("node:test");
 
 const workflow = readFileSync(join(__dirname, "../workflows/sync-upstream-nightly.yml"), "utf8");
-const script = workflow.match(/          script: \|\n([\s\S]+)$/)?.[1];
-assert.ok(script, "Expected the nightly sync script");
+const script = workflow.match(/          script: \|\n((?:            .*\n|\n)+)/)?.[1];
+assert.ok(script, "Expected the nightly resolver");
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
-const sync = new AsyncFunction("github", "context", "core", script.replace(/^            /gm, ""));
-
+const resolve = new AsyncFunction(
+  "github",
+  "context",
+  "core",
+  script.replace(/^            /gm, ""),
+);
 const nightly = {
   tag_name: "v0.1.7-nightly.20261103.4138",
   published_at: "2026-11-03T18:43:24Z",
@@ -16,54 +29,38 @@ const nightly = {
   target_commitish: "main",
 };
 
-function fixture({ releases = [nightly], mergeStatus = 201, mergeError, ref } = {}) {
+function fixture({ releases = [nightly], ref = "refs/heads/main" } = {}) {
   const calls = [];
-  const summary = [];
-  const context = {
-    repo: { owner: "alexander-cato", repo: "t3code" },
-    ref: ref ?? "refs/heads/main",
-    payload: { repository: { default_branch: "main" } },
-  };
+  const outputs = new Map();
   const github = {
     rest: {
       repos: {
         listReleases() {},
         async getCommit(params) {
-          calls.push(["commit", params]);
+          calls.push(params);
           return { data: { sha: "nightly-commit" } };
-        },
-        async merge(params) {
-          calls.push(["merge", params]);
-          if (mergeError) throw mergeError;
-          return { status: mergeStatus };
         },
       },
     },
-    async paginate(_method, params) {
-      calls.push(["releases", params]);
+    async paginate() {
       return releases;
     },
   };
+  const context = {
+    repo: { owner: "alexander-cato", repo: "t3code" },
+    ref,
+    payload: { repository: { default_branch: "main" } },
+  };
   const core = {
-    info(message) {
-      summary.push(message);
-    },
-    summary: {
-      addHeading() {
-        return this;
-      },
-      addRaw(message) {
-        summary.push(message);
-        return this;
-      },
-      async write() {},
+    setOutput(key, value) {
+      outputs.set(key, value);
     },
   };
-  return { run: () => sync(github, context, core), calls, summary };
+  return { run: () => resolve(github, context, core), calls, outputs };
 }
 
-test("merges the newest published nightly tag's exact commit into the fork", async () => {
-  const { run, calls } = fixture({
+test("resolves the newest published nightly tag to an immutable commit", async () => {
+  const { run, calls, outputs } = fixture({
     releases: [
       {
         ...nightly,
@@ -72,61 +69,122 @@ test("merges the newest published nightly tag's exact commit into the fork", asy
       },
       { ...nightly, tag_name: "v0.1.7" },
       { ...nightly, tag_name: "v0.1.7-preview.20261104.9999" },
-      { ...nightly, tag_name: "v0.1.7-nightly.20261104.9999", draft: true },
-      { ...nightly, tag_name: "v0.1.7-nightly.20261104.9998", published_at: null },
+      { ...nightly, draft: true },
+      { ...nightly, published_at: null },
       nightly,
     ],
   });
   await run();
-  assert.deepEqual(calls, [
-    ["releases", { owner: "pingdotgg", repo: "t3code", per_page: 100 }],
-    ["commit", { owner: "pingdotgg", repo: "t3code", ref: nightly.tag_name }],
-    [
-      "merge",
-      {
-        owner: "alexander-cato",
-        repo: "t3code",
-        base: "fork/nightly",
-        head: "nightly-commit",
-        commit_message: `chore: sync upstream ${nightly.tag_name}`,
-      },
-    ],
-  ]);
+  assert.deepEqual(calls, [{ owner: "pingdotgg", repo: "t3code", ref: nightly.tag_name }]);
+  assert.equal(outputs.get("sha"), "nightly-commit");
+  assert.equal(outputs.get("tag"), nightly.tag_name);
 });
 
-test("reports an already integrated nightly without changing the branch again", async () => {
-  const { run, summary } = fixture({ mergeStatus: 204 });
-  await run();
-  assert.match(summary.join("\n"), /Already contains/);
-});
-
-test("stops on conflicts without attempting to overwrite fork commits", async () => {
-  const mergeError = Object.assign(new Error("Merge conflict"), { status: 409 });
-  const { run, calls } = fixture({ mergeError });
-  await assert.rejects(run(), /Resolve the conflicts manually/);
-  assert.equal(calls.filter(([method]) => method === "merge").length, 1);
-});
-
-test("fails closed when no published nightly is available", async () => {
-  const { run, calls } = fixture({ releases: [] });
-  await assert.rejects(run(), /No published upstream nightly/);
-  assert.equal(calls.length, 1);
-});
-
-test("refuses manual runs from feature branches before accessing GitHub", async () => {
+test("fails closed without a nightly or when dispatched from a feature branch", async () => {
+  await assert.rejects(fixture({ releases: [] }).run(), /No published upstream nightly/);
   const { run, calls } = fixture({ ref: "refs/heads/feature" });
   await assert.rejects(run(), /must run from the fork default branch/);
-  assert.equal(calls.length, 0);
+  assert.deepEqual(calls, []);
 });
 
-test("explains which token permissions are needed when GitHub denies the merge", async () => {
-  const mergeError = Object.assign(new Error("Forbidden"), { status: 403 });
-  const { run } = fixture({ mergeError });
-  await assert.rejects(run(), /UPSTREAM_SYNC_TOKEN.*Contents.*Workflows/);
+function withRepository(body) {
+  const directory = mkdtempSync(join(tmpdir(), "t3-nightly-sync-"));
+  const env = {
+    ...process.env,
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_CONFIG_NOSYSTEM: "1",
+    GITHUB_STEP_SUMMARY: "",
+  };
+  const git = (...args) => {
+    const result = spawnSync("git", ["-c", "core.hooksPath=/dev/null", ...args], {
+      cwd: directory,
+      env,
+      encoding: "utf8",
+    });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout.trim();
+  };
+  const write = (file, value) => {
+    const destination = join(directory, file);
+    mkdirSync(dirname(destination), { recursive: true });
+    writeFileSync(destination, value);
+  };
+  try {
+    git("init", "-b", "main");
+    git("config", "user.name", "Nightly fixture");
+    git("config", "user.email", "fixture@example.com");
+    write("source.txt", "base source\n");
+    write(".github/workflows/common.yml", "base workflow\n");
+    write(".github/workflows/deleted.yml", "keep this workflow\n");
+    git("add", ".");
+    git("commit", "-m", "base");
+    const base = git("rev-parse", "HEAD");
+    git("checkout", "-b", "fork/nightly");
+    write("fork.txt", "fork customization\n");
+    write(".github/workflows/common.yml", "fork workflow\n");
+    write(".github/workflows/fork.yml", "fork automation\n");
+    git("add", ".");
+    git("commit", "-m", "fork customization");
+    const fork = git("rev-parse", "HEAD");
+    git("checkout", "-b", "upstream", base);
+    write("source.txt", "upstream source\n");
+    write(".github/workflows/common.yml", "upstream workflow\n");
+    write(".github/workflows/added.yml", "upstream automation\n");
+    git("rm", ".github/workflows/deleted.yml");
+    git("add", ".");
+    git("commit", "-m", "upstream nightly");
+    const upstream = git("rev-parse", "HEAD");
+    git("checkout", "fork/nightly");
+    const run = () =>
+      spawnSync("bash", [join(__dirname, "sync-upstream-nightly.sh"), upstream, nightly.tag_name], {
+        cwd: directory,
+        env,
+        encoding: "utf8",
+      });
+    body({ directory, git, write, fork, upstream, run });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+test("merges source and fork customizations while preserving every fork workflow", () => {
+  withRepository(({ directory, git, fork, upstream, run }) => {
+    const result = run();
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(readFileSync(join(directory, "source.txt"), "utf8"), "upstream source\n");
+    assert.equal(readFileSync(join(directory, "fork.txt"), "utf8"), "fork customization\n");
+    assert.equal(
+      git("rev-parse", "HEAD:.github/workflows"),
+      git("rev-parse", `${fork}:.github/workflows`),
+    );
+    assert.equal(existsSync(join(directory, ".github/workflows/added.yml")), false);
+    assert.equal(git("rev-parse", "HEAD^2"), upstream);
+    const synced = git("rev-parse", "HEAD");
+    assert.equal(run().status, 0);
+    assert.equal(git("rev-parse", "HEAD"), synced);
+  });
 });
 
-test("propagates API errors without a fallback update", async () => {
-  const mergeError = Object.assign(new Error("GitHub unavailable"), { status: 503 });
-  const { run } = fixture({ mergeError });
-  await assert.rejects(run(), (error) => error === mergeError);
+test("aborts source conflicts without publishing a partial merge", () => {
+  withRepository(({ directory, git, write, run }) => {
+    write("source.txt", "conflicting fork change\n");
+    git("add", ".");
+    git("commit", "-m", "fork source change");
+    const before = git("rev-parse", "HEAD");
+    const result = run();
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /Resolve these source conflicts manually/);
+    assert.equal(git("rev-parse", "HEAD"), before);
+    assert.equal(git("status", "--porcelain"), "");
+    assert.equal(readFileSync(join(directory, "source.txt"), "utf8"), "conflicting fork change\n");
+  });
+});
+
+test("refuses a dirty checkout without changing local work", () => {
+  withRepository(({ directory, git, write, fork, run }) => {
+    write("source.txt", "uncommitted work\n");
+    assert.notEqual(run().status, 0);
+    assert.equal(git("rev-parse", "HEAD"), fork);
+    assert.equal(readFileSync(join(directory, "source.txt"), "utf8"), "uncommitted work\n");
+  });
 });
