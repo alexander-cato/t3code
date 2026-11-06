@@ -121,6 +121,12 @@ contextBridge.exposeInMainWorld("desktopBridge", {
   setLocalEnvironmentEnabled: (enabled) =>
     ipcRenderer.invoke(IpcChannels.SET_LOCAL_ENVIRONMENT_ENABLED_CHANNEL, enabled),
   getClientSettings: () => ipcRenderer.invoke(IpcChannels.GET_CLIENT_SETTINGS_CHANNEL),
+  getInstallationDataState: () =>
+    ipcRenderer.invoke(IpcChannels.GET_INSTALLATION_DATA_STATE_CHANNEL),
+  importInstallationData: (directory) =>
+    ipcRenderer.invoke(IpcChannels.IMPORT_INSTALLATION_DATA_CHANNEL, directory),
+  restoreInstallationData: (id) =>
+    ipcRenderer.invoke(IpcChannels.RESTORE_INSTALLATION_DATA_CHANNEL, id),
   setClientSettings: (settings) =>
     ipcRenderer.invoke(IpcChannels.SET_CLIENT_SETTINGS_CHANNEL, settings),
   requestSnapShotPermissions: (includeAccessibility) =>
