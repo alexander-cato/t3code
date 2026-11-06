@@ -51,7 +51,7 @@ export class DesktopInstallationDataUnavailable extends Schema.TaggedError<Deskt
       case "source-missing":
         return "This folder does not contain a T3 Code database. Choose a T3 home folder or its userdata folder.";
       case "source-busy":
-        return "The source has unfinished agent work. Let it finish before importing, or use Keep connected.";
+        return "The source has unfinished work, a PR watch, or automatic recovery enabled for a thread. Finish or stop it before importing, or use Keep connected.";
       case "unsafe-path":
         return "The import contains a link outside its data folder or an invalid backup path.";
       case "pending-import":
@@ -88,6 +88,9 @@ const decodePending = Schema.decodeEffect(Pending);
 const encodeBackup = Schema.encodeEffect(Backup);
 const decodeBackup = Schema.decodeEffect(Backup);
 const decodeRuntime = Schema.decodeEffect(Runtime);
+const Settings = Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown));
+const decodeSettings = Schema.decodeEffect(Settings);
+const encodeSettings = Schema.encodeEffect(Settings);
 const validId = (id: string) =>
   /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(id);
 const portableRootEntry = (name: string) =>
@@ -162,6 +165,19 @@ const snapshotDatabase = Effect.fn("desktop.installationData.snapshotDatabase")(
           [
             "orchestration_v2_projection_runs",
             "status IN ('preparing', 'queued', 'starting', 'running', 'waiting')",
+          ],
+          ["orchestration_v2_projection_runtime_requests", "status = 'pending'"],
+          [
+            "orchestration_v2_projection_provider_sessions",
+            "status NOT IN ('stopped', 'error') OR (json_valid(payload_json) AND json_array_length(payload_json, '$.extensionStatuses') > 0)",
+          ],
+          [
+            "orchestration_v2_projection_provider_threads",
+            "status = 'active' OR (json_valid(payload_json) AND (json_array_length(payload_json, '$.pendingBackgroundTasks') > 0 OR json_extract(payload_json, '$.goal.status') = 'active'))",
+          ],
+          [
+            "orchestration_v2_projection_threads",
+            "json_valid(payload_json) AND (json_extract(payload_json, '$.limitRecovery.autoResume') = 1 OR EXISTS (SELECT 1 FROM json_each(payload_json, '$.pullRequests') AS link WHERE json_type(link.value, '$.watch') = 'object'))",
           ],
         ] as const) {
           if (
@@ -353,6 +369,20 @@ export const make = Effect.gen(function* () {
           yield* snapshotDatabase(real, path.join(stage, name));
           yield* fs.chmod(path.join(stage, name), 0o600);
         }
+      }
+      const settingsPath = path.join(stage, "settings.json");
+      if (yield* fs.exists(settingsPath)) {
+        const settings = yield* fs
+          .readFileString(settingsPath)
+          .pipe(Effect.flatMap(decodeSettings));
+        yield* fs.writeFileString(
+          settingsPath,
+          yield* encodeSettings({
+            ...settings,
+            autoResumeLimitedThreads: false,
+            continueThreadsAfterServerUpdate: false,
+          }),
+        );
       }
       for (const name of [
         "desktop-settings.json",

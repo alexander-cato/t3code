@@ -25,6 +25,10 @@ const fixture = Effect.gen(function* () {
   yield* fs.makeDirectory(path.join(source, "secrets"));
   yield* fs.writeFileString(path.join(source, "attachments", "saved.txt"), "source attachment");
   yield* fs.writeFileString(path.join(source, "client-settings.json"), '{"theme":"dark"}');
+  yield* fs.writeFileString(
+    path.join(source, "settings.json"),
+    '{"autoResumeLimitedThreads":true,"continueThreadsAfterServerUpdate":true,"theme":"dark"}',
+  );
   yield* fs.writeFileString(path.join(source, "environment-id"), "source-environment");
   yield* fs.writeFileString(path.join(source, "server-owner.sqlite"), "source-only ownership");
   yield* fs.writeFileString(
@@ -55,6 +59,10 @@ const fixture = Effect.gen(function* () {
     INSERT INTO scheduled_tasks VALUES (1, '2026-12-01');
     CREATE TABLE orchestration_v2_effect_outbox (status TEXT);
     CREATE TABLE orchestration_v2_projection_runs (status TEXT);
+    CREATE TABLE orchestration_v2_projection_threads (payload_json TEXT);
+    CREATE TABLE orchestration_v2_projection_provider_threads (status TEXT, payload_json TEXT);
+    CREATE TABLE orchestration_v2_projection_provider_sessions (status TEXT, payload_json TEXT);
+    CREATE TABLE orchestration_v2_projection_runtime_requests (status TEXT);
   `);
   const environment = yield* DesktopEnvironment.DesktopEnvironment.pipe(
     Effect.provide(
@@ -111,6 +119,14 @@ it.effect(
         copy.close();
       }
       assert.equal(f.database.prepare("SELECT enabled FROM scheduled_tasks").get()?.enabled, 1);
+      assert.equal(
+        yield* f.fs.readFileString(f.path.join(f.target, "settings.json")),
+        '{"autoResumeLimitedThreads":false,"continueThreadsAfterServerUpdate":false,"theme":"dark"}',
+      );
+      assert.include(
+        yield* f.fs.readFileString(f.path.join(f.source, "settings.json")),
+        '"autoResumeLimitedThreads":true',
+      );
       assert.equal(
         f.database.prepare("SELECT COUNT(*) AS count FROM auth_sessions").get()?.count,
         1,
@@ -171,6 +187,27 @@ it.effect(
       else assert.fail("Import should reject pending agent effects");
       assert.isFalse(yield* f.fs.exists(f.path.join(f.base, "pending-installation-import.json")));
       f.database.exec("DELETE FROM orchestration_v2_effect_outbox");
+      for (const [table, values] of [
+        ["orchestration_v2_projection_threads", ['{"limitRecovery":{"autoResume":true}}']],
+        ["orchestration_v2_projection_threads", ['{"pullRequests":[{"watch":{}}]}']],
+        ["orchestration_v2_projection_provider_threads", ["active", "{}"]],
+        [
+          "orchestration_v2_projection_provider_threads",
+          ["idle", '{"pendingBackgroundTasks":[{}]}'],
+        ],
+        ["orchestration_v2_projection_provider_threads", ["idle", '{"goal":{"status":"active"}}']],
+        ["orchestration_v2_projection_provider_sessions", ["running", "{}"]],
+        ["orchestration_v2_projection_runtime_requests", ["pending"]],
+      ] as const) {
+        f.database
+          .prepare(`INSERT INTO ${table} VALUES (${values.map(() => "?").join(",")})`)
+          .run(...values);
+        const recovery = yield* Effect.flip(f.data.prepare(f.source));
+        if (recovery._tag === "DesktopInstallationDataUnavailable")
+          assert.equal(recovery.reason, "source-busy");
+        else assert.fail(`Import should reject resumable work in ${table}`);
+        f.database.exec(`DELETE FROM ${table}`);
+      }
       yield* f.fs.writeFileString(
         f.path.join(f.target, "state.sqlite"),
         "guarded by overlap validation",
