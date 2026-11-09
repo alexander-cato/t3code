@@ -138,7 +138,7 @@ test("pins fork builds and public configuration to the fork branch commit", asyn
       author: "github-actions[bot]",
       provenance: validProvenance,
     },
-    { committer: "web-flow", author: "alexander-cato" },
+    { committer: "web-flow", author: "alexander-cato", provenance: validProvenance },
     { committer: "web-flow", author: "github-actions[bot]", provenance: validProvenance },
   ]) {
     const { run, outputs, reads, verificationPaths } = fixture(identity);
@@ -151,6 +151,10 @@ test("pins fork builds and public configuration to the fork branch commit", asyn
     assert.equal(verificationPaths.length, identity.provenance ? 1 : 0);
     for (const path of verificationPaths) assert.equal(existsSync(dirname(path)), false);
   }
+  await assert.rejects(
+    fixture({ committer: "web-flow", author: "alexander-cato" }).run(),
+    /attestation|provenance/i,
+  );
   for (const provenance of [
     null,
     "error",

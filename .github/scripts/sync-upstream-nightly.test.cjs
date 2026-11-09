@@ -151,7 +151,7 @@ test("resolves the newest published nightly tag to an immutable commit", async (
       author: "github-actions[bot]",
       provenance: validProvenance,
     },
-    { committer: "web-flow", author: "alexander-cato" },
+    { committer: "web-flow", author: "alexander-cato", provenance: validProvenance },
     { committer: "web-flow", author: "github-actions[bot]", provenance: validProvenance },
   ]) {
     const accepted = fixture(identity);
@@ -180,6 +180,10 @@ test("fails closed without a nightly, with an untrusted fork head, or on feature
     assert.equal(rejected.outputs.size, 0);
     assert.equal(rejected.calls.length, 1);
   }
+  await assert.rejects(
+    fixture({ committer: "web-flow", author: "alexander-cato" }).run(),
+    /attestation|provenance/i,
+  );
   for (const provenance of [
     null,
     "error",

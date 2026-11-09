@@ -36,6 +36,10 @@ on:
       AZURE_TRUSTED_SIGNING_PUBLISHER_NAME:
         required: false
     inputs:
+      release_environment:
+        required: false
+        default: desktop-release
+        type: string
       desktop_fork:
         required: false
         default: false
@@ -124,9 +128,11 @@ jobs:
     name: Build ${{ inputs.label }}
     if: >-
       github.repository != 'alexander-cato/t3code' ||
-      (inputs.desktop_fork && github.ref == 'refs/heads/main' &&
+      (inputs.desktop_fork && inputs.release_environment == 'fork-release' &&
+      github.ref == 'refs/heads/main' &&
       (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_run'))
     runs-on: ${{ inputs.runner }}
+    environment: ${{ inputs.release_environment }}
     # Windows waits for the Linux CLI archive inside its own budget (see
     # "Wait for Linux CLI archive"), so it gets that wait on top of the usual 30.
     timeout-minutes: ${{ inputs.platform == 'win' && 70 || 30 }}
@@ -159,6 +165,7 @@ jobs:
       # pnpm checks the lockfile and policy before reusing this result. A missing
       # artifact leaves the cache empty, so installation runs the checks again.
       - name: Download dependency verification
+        if: ${{ !inputs.desktop_fork }}
         continue-on-error: true
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
@@ -172,10 +179,8 @@ jobs:
         env:
           pnpm_config_cache_dir: ${{ runner.temp }}/pnpm-metadata
 
-      # The CLI archive and the staged app install without a lockfile, so they
-      # ask the registry about every package and fetch platform packages the
-      # workspace store lacks. They share this registry metadata and store. A
-      # new week starts cold, which bounds how stale cached ranges can get.
+      # Frozen staged installs still fetch registry metadata and missing platform
+      # packages. The CLI and desktop share this metadata and package store.
       - name: Resolve staged install cache
         id: stage_pnpm
         shell: bash

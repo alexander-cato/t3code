@@ -50,8 +50,7 @@ jobs:
             if (source.commit?.verification?.verified !== true || !trustedCommitter) {
               throw new Error(`Refusing fork/nightly ${forkRef}: require a GitHub-verified commit by alexander-cato or github-actions[bot]. Review and restore the branch to a trusted signed commit before syncing.`);
             }
-            const automatedCommit = committer === 'github-actions[bot]' ||
-              (committer === 'web-flow' && source.author?.login === 'github-actions[bot]');
+            const automatedCommit = committer === 'github-actions[bot]' || committer === 'web-flow';
             if (automatedCommit) {
               const fs = require('node:fs/promises');
               const { join } = require('node:path');
