@@ -3,6 +3,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./desktopForkIdentity": {
+      "types": "./src/desktopForkIdentity.ts",
+      "import": "./src/desktopForkIdentity.ts"
+    },
     "./changedFileKind": {
       "types": "./src/changedFileKind.ts",
       "import": "./src/changedFileKind.ts"

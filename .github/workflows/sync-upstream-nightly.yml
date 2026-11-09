@@ -1,0 +1,83 @@
+name: Sync upstream nightly
+
+on:
+  schedule:
+    - cron: "17,47 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-upstream-nightly
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.repository == 'alexander-cato/t3code'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - id: nightly
+        name: Resolve the latest published upstream nightly
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const defaultBranch = context.payload.repository.default_branch;
+            if (!defaultBranch || context.ref !== `refs/heads/${defaultBranch}`) {
+              throw new Error('Nightly sync must run from the fork default branch.');
+            }
+
+            const upstream = { owner: 'pingdotgg', repo: 't3code' };
+            const releases = await github.paginate(github.rest.repos.listReleases, {
+              ...upstream,
+              per_page: 100,
+            });
+            const nightly = releases
+              .filter((release) =>
+                !release.draft && release.published_at &&
+                /^v\d+\.\d+\.\d+-nightly\.\d{8}\.\d+$/.test(release.tag_name))
+              .sort((a, b) => Date.parse(b.published_at) - Date.parse(a.published_at))[0];
+            if (!nightly) {
+              throw new Error('No published upstream nightly found.');
+            }
+
+            const { data: commit } = await github.rest.repos.getCommit({
+              ...upstream,
+              ref: nightly.tag_name,
+            });
+            core.setOutput('sha', commit.sha);
+            core.setOutput('tag', nightly.tag_name);
+
+      - name: Checkout fork source and trusted sync script
+        env:
+          WORKFLOW_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          git init .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git fetch --no-tags --filter=blob:none origin "$WORKFLOW_SHA" refs/heads/fork/nightly:refs/remotes/origin/fork/nightly
+          git sparse-checkout set --no-cone '/*' '!/.repos/'
+          git checkout -b nightly-sync refs/remotes/origin/fork/nightly
+          git show "$WORKFLOW_SHA":.github/scripts/sync-upstream-nightly.sh > "$RUNNER_TEMP/sync-upstream-nightly.sh"
+
+      - name: Merge source while preserving fork workflows
+        env:
+          UPSTREAM_SHA: ${{ steps.nightly.outputs.sha }}
+          NIGHTLY_TAG: ${{ steps.nightly.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --filter=blob:none https://github.com/pingdotgg/t3code.git "$UPSTREAM_SHA"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          bash "$RUNNER_TEMP/sync-upstream-nightly.sh" "$UPSTREAM_SHA" "$NIGHTLY_TAG"
+
+      - name: Push synced fork branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh auth setup-git
+          git push origin HEAD:refs/heads/fork/nightly

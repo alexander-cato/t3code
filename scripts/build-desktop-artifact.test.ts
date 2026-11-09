@@ -4,7 +4,7 @@ import * as NodePath from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { createPackageWithOptions, extractFile } from "@electron/asar";
-import { assert, it } from "@effect/vitest";
+import { assert, expect, it } from "@effect/vitest";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
@@ -542,6 +542,53 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       Effect.provide(
         ConfigProvider.layer(
           ConfigProvider.fromEnv({ env: { GITHUB_REPOSITORY: "pingdotgg/t3code" } }),
+        ),
+      ),
+    ),
+  );
+
+  it.effect("keeps fork installers, signing identity, and update feeds separate", () =>
+    Effect.gen(function* () {
+      const signed = yield* createBuildConfig(
+        "mac",
+        "dmg",
+        "0.1.7-nightly.20261104.1",
+        true,
+        false,
+        undefined,
+        undefined,
+      );
+      const unsigned = yield* createBuildConfig(
+        "mac",
+        "dmg",
+        "0.1.7-nightly.20261104.1",
+        false,
+        false,
+        undefined,
+        undefined,
+      );
+      assert.equal(signed.appId, "com.alexandercato.t3code.fork");
+      assert.equal(signed.productName, "T3 Code Fork (Nightly)");
+      assert.equal(signed.artifactName, "T3-Code-Fork-${version}-${arch}.${ext}");
+      assert.deepStrictEqual(signed.publish, [
+        {
+          provider: "github",
+          owner: "alexander-cato",
+          repo: "t3code",
+          releaseType: "prerelease",
+          channel: "nightly",
+        },
+      ]);
+      assert.isNull(unsigned.publish);
+      expect(signed.mac).toMatchObject({
+        protocols: [{ name: "T3 Code Fork", schemes: ["t3code-fork"] }],
+      });
+    }).pipe(
+      Effect.provide(
+        ConfigProvider.layer(
+          ConfigProvider.fromEnv({
+            env: { T3CODE_DESKTOP_FORK: "true", GITHUB_REPOSITORY: "pingdotgg/t3code" },
+          }),
         ),
       ),
     ),
