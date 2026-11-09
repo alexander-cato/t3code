@@ -26,6 +26,10 @@ function fixture({
   version = "0.1.6",
   ref = "refs/heads/main",
   force = false,
+  verified = true,
+  committer = "alexander-cato",
+  author = "alexander-cato",
+  sourceSha = "fork-commit",
 } = {}) {
   const outputs = new Map();
   const reads = [];
@@ -38,6 +42,16 @@ function fixture({
           return { data: { commit: { sha: "fork-commit" } } };
         },
         async getCommit({ ref }) {
+          if (ref === "fork-commit") {
+            return {
+              data: {
+                sha: sourceSha,
+                commit: { verification: { verified } },
+                committer: { login: committer },
+                author: { login: author },
+              },
+            };
+          }
           assert.equal(ref, nightly.tag_name);
           return { data: { sha: previousSha } };
         },
@@ -80,13 +94,20 @@ function fixture({
 }
 
 test("pins fork builds and public configuration to the fork branch commit", async () => {
-  const { run, outputs, reads } = fixture();
-  await run();
-  assert.equal(outputs.get("ref"), "fork-commit");
-  assert.match(outputs.get("version"), /^0\.1\.7-nightly\.\d{8}\.42$/);
-  assert.equal(outputs.get("tag"), `v${outputs.get("version")}`);
-  assert.equal(outputs.get("build"), "true");
-  assert.deepEqual(reads, ["apps/desktop/package.json", ".env.example"]);
+  for (const identity of [
+    { committer: "alexander-cato" },
+    { committer: "github-actions[bot]", author: "github-actions[bot]" },
+    { committer: "web-flow", author: "alexander-cato" },
+    { committer: "web-flow", author: "github-actions[bot]" },
+  ]) {
+    const { run, outputs, reads } = fixture(identity);
+    await run();
+    assert.equal(outputs.get("ref"), "fork-commit");
+    assert.match(outputs.get("version"), /^0\.1\.7-nightly\.\d{8}\.42$/);
+    assert.equal(outputs.get("tag"), `v${outputs.get("version")}`);
+    assert.equal(outputs.get("build"), "true");
+    assert.deepEqual(reads, ["apps/desktop/package.json", ".env.example"]);
+  }
 });
 
 test("does not rebuild a fork commit that already has a published nightly", async () => {
@@ -115,8 +136,21 @@ test("draft installers do not suppress a published build", async () => {
   assert.equal(outputs.get("build"), "true");
 });
 
-test("refuses a feature-branch dispatch and invalid source versions", async () => {
+test("refuses feature-branch dispatches, untrusted commits, and invalid source versions", async () => {
   await assert.rejects(fixture({ ref: "refs/heads/feature" }).run(), /default branch/);
+  for (const trust of [
+    { verified: false },
+    { verified: null },
+    { verified: "true" },
+    { committer: "third-party[bot]", author: "alexander-cato" },
+    { committer: "web-flow", author: "third-party[bot]" },
+    { sourceSha: "different-commit" },
+  ]) {
+    const { run, outputs, reads } = fixture(trust);
+    await assert.rejects(run(), /verified.*alexander-cato|SHA/);
+    assert.notEqual(outputs.get("build"), "true");
+    assert.deepEqual(reads, []);
+  }
   const { run, outputs } = fixture({ version: "not-a-version" });
   await assert.rejects(run(), /Expected a stable package version/);
   assert.notEqual(outputs.get("build"), "true");

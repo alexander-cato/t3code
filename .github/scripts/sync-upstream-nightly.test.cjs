@@ -30,15 +30,37 @@ const nightly = {
   target_commitish: "main",
 };
 
-function fixture({ releases = [nightly], ref = "refs/heads/main" } = {}) {
+function fixture({
+  releases = [nightly],
+  ref = "refs/heads/main",
+  verified = true,
+  committer = "alexander-cato",
+  author = "alexander-cato",
+  sourceSha = "fork-commit",
+} = {}) {
   const calls = [];
   const outputs = new Map();
   const github = {
     rest: {
       repos: {
         listReleases() {},
+        async getBranch({ branch }) {
+          assert.equal(branch, "fork/nightly");
+          return { data: { commit: { sha: "fork-commit" } } };
+        },
         async getCommit(params) {
           calls.push(params);
+          if (params.owner === "alexander-cato") {
+            assert.equal(params.ref, "fork-commit");
+            return {
+              data: {
+                sha: sourceSha,
+                commit: { verification: { verified } },
+                committer: { login: committer },
+                author: { login: author },
+              },
+            };
+          }
           return { data: { sha: "nightly-commit" } };
         },
       },
@@ -76,16 +98,42 @@ test("resolves the newest published nightly tag to an immutable commit", async (
     ],
   });
   await run();
-  assert.deepEqual(calls, [{ owner: "pingdotgg", repo: "t3code", ref: nightly.tag_name }]);
+  assert.deepEqual(calls, [
+    { owner: "alexander-cato", repo: "t3code", ref: "fork-commit" },
+    { owner: "pingdotgg", repo: "t3code", ref: nightly.tag_name },
+  ]);
   assert.equal(outputs.get("sha"), "nightly-commit");
   assert.equal(outputs.get("tag"), nightly.tag_name);
+  assert.equal(outputs.get("fork_ref"), "fork-commit");
+  for (const identity of [
+    { committer: "github-actions[bot]", author: "github-actions[bot]" },
+    { committer: "web-flow", author: "alexander-cato" },
+    { committer: "web-flow", author: "github-actions[bot]" },
+  ]) {
+    const accepted = fixture(identity);
+    await accepted.run();
+    assert.equal(accepted.outputs.get("fork_ref"), "fork-commit");
+  }
 });
 
-test("fails closed without a nightly or when dispatched from a feature branch", async () => {
+test("fails closed without a nightly, with an untrusted fork head, or on feature branches", async () => {
   await assert.rejects(fixture({ releases: [] }).run(), /No published upstream nightly/);
   const { run, calls } = fixture({ ref: "refs/heads/feature" });
   await assert.rejects(run(), /must run from the fork default branch/);
   assert.deepEqual(calls, []);
+  for (const trust of [
+    { verified: false },
+    { verified: null },
+    { verified: "true" },
+    { committer: "third-party[bot]", author: "alexander-cato" },
+    { committer: "web-flow", author: "third-party[bot]" },
+    { sourceSha: "different-commit" },
+  ]) {
+    const rejected = fixture(trust);
+    await assert.rejects(rejected.run(), /verified.*alexander-cato|SHA/);
+    assert.equal(rejected.outputs.size, 0);
+    assert.equal(rejected.calls.length, 1);
+  }
 });
 
 function withRepository(body) {
