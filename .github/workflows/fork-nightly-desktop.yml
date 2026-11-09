@@ -187,9 +187,18 @@ jobs:
       actions: read
       contents: read
     uses: ./.github/workflows/release-desktop.yml
+    # Named forwarding is required for secrets held only in the called job's environment.
+    secrets:
+      CSC_LINK: ${{ secrets.CSC_LINK }}
+      CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+      APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+      APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+      APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+      MACOS_PROVISIONING_PROFILE: ${{ secrets.MACOS_PROVISIONING_PROFILE }}
     with:
       desktop_fork: true
       release_environment: fork-release
+      require_macos_signing: ${{ needs.resolve.outputs.signed == 'true' }}
       label: Fork macOS arm64
       runner: macos-26
       platform: mac
