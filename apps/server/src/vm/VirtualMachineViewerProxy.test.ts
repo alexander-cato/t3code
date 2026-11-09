@@ -85,6 +85,7 @@ it("forwards guest authorization, strips environment credentials, and allows rem
   expect(response.headers.get("set-cookie")).toBeNull();
   expect(response.headers.get("content-security-policy")).toContain("frame-ancestors *");
   expect(response.headers.get("content-security-policy")).toContain("t3code: t3code-dev:");
+  expect(response.headers.get("content-security-policy")).toContain("t3code-fork:");
   expect(response.headers.get("content-security-policy")).toContain("sandbox allow-scripts");
   expect(response.headers.get("content-security-policy")).not.toContain("allow-same-origin");
   expect(response.headers.get("access-control-allow-origin")).toBe("null");
