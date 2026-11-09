@@ -49,6 +49,14 @@ jobs:
             }
             const { data: branch } = await github.rest.repos.getBranch({ ...context.repo, branch: 'fork/nightly' });
             const ref = branch.commit.sha;
+            const { data: source } = await github.rest.repos.getCommit({ ...context.repo, ref });
+            if (source.sha !== ref) throw new Error('GitHub returned a different SHA for fork/nightly; rerun the build.');
+            const committer = source.committer?.login;
+            const trustedCommitter = committer === 'alexander-cato' || committer === 'github-actions[bot]' ||
+              (committer === 'web-flow' && ['alexander-cato', 'github-actions[bot]'].includes(source.author?.login));
+            if (source.commit?.verification?.verified !== true || !trustedCommitter) {
+              throw new Error(`Refusing fork/nightly ${ref}: require a GitHub-verified commit by alexander-cato or github-actions[bot]. Review and restore the branch to a trusted signed commit before rebuilding.`);
+            }
             const releases = await github.paginate(github.rest.repos.listReleases, { ...context.repo, per_page: 100 });
             const latest = releases
               .filter((release) => !release.draft && release.published_at && /^v\d+\.\d+\.\d+-nightly\.\d{8}\.\d+$/.test(release.tag_name))

@@ -30,6 +30,17 @@ jobs:
               throw new Error('Nightly sync must run from the fork default branch.');
             }
 
+            const { data: branch } = await github.rest.repos.getBranch({ ...context.repo, branch: 'fork/nightly' });
+            const forkRef = branch.commit.sha;
+            const { data: source } = await github.rest.repos.getCommit({ ...context.repo, ref: forkRef });
+            if (source.sha !== forkRef) throw new Error('GitHub returned a different SHA for fork/nightly; rerun sync.');
+            const committer = source.committer?.login;
+            const trustedCommitter = committer === 'alexander-cato' || committer === 'github-actions[bot]' ||
+              (committer === 'web-flow' && ['alexander-cato', 'github-actions[bot]'].includes(source.author?.login));
+            if (source.commit?.verification?.verified !== true || !trustedCommitter) {
+              throw new Error(`Refusing fork/nightly ${forkRef}: require a GitHub-verified commit by alexander-cato or github-actions[bot]. Review and restore the branch to a trusted signed commit before syncing.`);
+            }
+
             const upstream = { owner: 'pingdotgg', repo: 't3code' };
             const releases = await github.paginate(github.rest.repos.listReleases, {
               ...upstream,
@@ -48,19 +59,21 @@ jobs:
               ...upstream,
               ref: nightly.tag_name,
             });
+            core.setOutput('fork_ref', forkRef);
             core.setOutput('sha', commit.sha);
             core.setOutput('tag', nightly.tag_name);
 
       - name: Checkout fork source and trusted sync script
         env:
           WORKFLOW_SHA: ${{ github.sha }}
+          FORK_REF: ${{ steps.nightly.outputs.fork_ref }}
         run: |
           set -euo pipefail
           git init .
           git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
-          git fetch --no-tags --filter=blob:none origin "$WORKFLOW_SHA" refs/heads/fork/nightly:refs/remotes/origin/fork/nightly
+          git fetch --no-tags --filter=blob:none origin "$WORKFLOW_SHA" "$FORK_REF"
           git sparse-checkout set --no-cone '/*' '!/.repos/'
-          git checkout -b nightly-sync refs/remotes/origin/fork/nightly
+          git checkout -b nightly-sync "$FORK_REF"
           git show "$WORKFLOW_SHA":.github/scripts/sync-upstream-nightly.sh > "$RUNNER_TEMP/sync-upstream-nightly.sh"
           git show "$WORKFLOW_SHA":.github/scripts/create-nightly-sync-commit.cjs > "$RUNNER_TEMP/create-nightly-sync-commit.cjs"
 
