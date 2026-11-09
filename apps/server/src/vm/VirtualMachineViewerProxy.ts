@@ -214,7 +214,7 @@ const handler = Effect.gen(function* () {
   // origin-bearing sandbox policy and gain access to the environment APIs.
   // HTTP's wildcard ancestor source does not match the custom desktop schemes.
   responseHeaders["content-security-policy"] =
-    "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; media-src 'self' blob:; worker-src 'self' blob:; connect-src 'self' ws: wss:; frame-ancestors * t3code: t3code-dev:; base-uri 'none'; form-action 'none'; sandbox allow-scripts allow-downloads allow-pointer-lock";
+    "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; media-src 'self' blob:; worker-src 'self' blob:; connect-src 'self' ws: wss:; frame-ancestors * t3code: t3code-dev: t3code-fork:; base-uri 'none'; form-action 'none'; sandbox allow-scripts allow-downloads allow-pointer-lock";
   if (upstreamPath === "/viewer/" && response.headers["content-type"]?.includes("text/html")) {
     const html = yield* Effect.raceFirst(
       response.text.pipe(Effect.onInterrupt(() => abort)),
