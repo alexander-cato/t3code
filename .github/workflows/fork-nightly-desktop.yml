@@ -27,6 +27,9 @@ jobs:
       github.event.workflow_run.head_branch == github.event.repository.default_branch))
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    permissions:
+      contents: read
+      attestations: read
     outputs:
       build: ${{ steps.resolve.outputs.build }}
       ref: ${{ steps.resolve.outputs.ref }}
@@ -38,10 +41,17 @@ jobs:
       clerk_cli_oauth_client_id: ${{ steps.resolve.outputs.clerk_cli_oauth_client_id }}
       relay_url: ${{ steps.resolve.outputs.relay_url }}
     steps:
+      - name: Require patched provenance verifier
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(gh --version | head -n 1 | cut -d ' ' -f 3)"
+          dpkg --compare-versions "$version" ge 2.102.0
       - id: resolve
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         env:
           FORCE_BUILD: ${{ inputs.force }}
+          GH_TOKEN: ${{ github.token }}
         with:
           script: |
             if (context.ref !== `refs/heads/${context.payload.repository.default_branch}`) {
@@ -56,6 +66,30 @@ jobs:
               (committer === 'web-flow' && ['alexander-cato', 'github-actions[bot]'].includes(source.author?.login));
             if (source.commit?.verification?.verified !== true || !trustedCommitter) {
               throw new Error(`Refusing fork/nightly ${ref}: require a GitHub-verified commit by alexander-cato or github-actions[bot]. Review and restore the branch to a trusted signed commit before rebuilding.`);
+            }
+            const automatedCommit = committer === 'github-actions[bot]' ||
+              (committer === 'web-flow' && source.author?.login === 'github-actions[bot]');
+            if (automatedCommit) {
+              const fs = require('node:fs/promises');
+              const { join } = require('node:path');
+              const { tmpdir } = require('node:os');
+              const directory = await fs.mkdtemp(join(tmpdir(), 't3-sync-provenance-'));
+              try {
+                const subject = join(directory, 'fork-nightly-commit.txt');
+                await fs.writeFile(subject, `${ref}\n`);
+                const exitCode = await exec.exec('gh', [
+                  'attestation', 'verify', subject,
+                  '--repo', 'alexander-cato/t3code',
+                  '--source-ref', 'refs/heads/main',
+                  '--signer-workflow', 'alexander-cato/t3code/.github/workflows/sync-upstream-nightly.yml',
+                  '--deny-self-hosted-runners',
+                ], { silent: true, ignoreReturnCode: true });
+                if (exitCode !== 0) throw new Error('Attestation verification failed.');
+              } catch (cause) {
+                throw new Error(`Refusing automated fork/nightly ${ref}: require provenance from this repository's hosted main-branch nightly sync. Restore a trusted owner-signed commit or rerun the trusted sync workflow.`, { cause });
+              } finally {
+                await fs.rm(directory, { recursive: true, force: true });
+              }
             }
             const releases = await github.paginate(github.rest.repos.listReleases, { ...context.repo, per_page: 100 });
             const latest = releases

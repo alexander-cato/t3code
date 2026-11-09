@@ -1,6 +1,6 @@
 const assert = require("node:assert/strict");
-const { readFileSync } = require("node:fs");
-const { join } = require("node:path");
+const { existsSync, readFileSync } = require("node:fs");
+const { dirname, join } = require("node:path");
 const test = require("node:test");
 
 const workflow = readFileSync(join(__dirname, "../workflows/fork-nightly-desktop.yml"), "utf8");
@@ -12,12 +12,21 @@ const resolve = new AsyncFunction(
   "context",
   "core",
   "process",
+  "exec",
+  "require",
   script.replace(/^            /gm, ""),
 );
 const nightly = {
   tag_name: "v0.1.7-nightly.20261104.1",
   published_at: "2026-11-04T00:00:00Z",
   draft: false,
+};
+const validProvenance = {
+  repository: "alexander-cato/t3code",
+  ref: "refs/heads/main",
+  workflow: "alexander-cato/t3code/.github/workflows/sync-upstream-nightly.yml",
+  hosted: true,
+  subject: "fork-commit\n",
 };
 
 function fixture({
@@ -30,9 +39,35 @@ function fixture({
   committer = "alexander-cato",
   author = "alexander-cato",
   sourceSha = "fork-commit",
+  provenance = null,
 } = {}) {
   const outputs = new Map();
   const reads = [];
+  const verificationPaths = [];
+  const exec = {
+    async exec(command, args) {
+      assert.equal(command, "gh");
+      assert.deepEqual(args.slice(0, 2), ["attestation", "verify"]);
+      assert.deepEqual(args.slice(3), [
+        "--repo",
+        validProvenance.repository,
+        "--source-ref",
+        validProvenance.ref,
+        "--signer-workflow",
+        validProvenance.workflow,
+        "--deny-self-hosted-runners",
+      ]);
+      verificationPaths.push(args[2]);
+      const subject = readFileSync(args[2], "utf8");
+      if (provenance === "error") throw new Error("verification unavailable");
+      return provenance &&
+        Object.keys(validProvenance).every(
+          (key) => provenance[key] === (key === "subject" ? subject : validProvenance[key]),
+        )
+        ? 0
+        : 1;
+    },
+  };
   const github = {
     rest: {
       repos: {
@@ -87,26 +122,54 @@ function fixture({
     },
   };
   return {
-    run: () => resolve(github, context, core, { env: { FORCE_BUILD: String(force) } }),
+    run: () =>
+      resolve(github, context, core, { env: { FORCE_BUILD: String(force) } }, exec, require),
     outputs,
     reads,
+    verificationPaths,
   };
 }
 
 test("pins fork builds and public configuration to the fork branch commit", async () => {
   for (const identity of [
     { committer: "alexander-cato" },
-    { committer: "github-actions[bot]", author: "github-actions[bot]" },
+    {
+      committer: "github-actions[bot]",
+      author: "github-actions[bot]",
+      provenance: validProvenance,
+    },
     { committer: "web-flow", author: "alexander-cato" },
-    { committer: "web-flow", author: "github-actions[bot]" },
+    { committer: "web-flow", author: "github-actions[bot]", provenance: validProvenance },
   ]) {
-    const { run, outputs, reads } = fixture(identity);
+    const { run, outputs, reads, verificationPaths } = fixture(identity);
     await run();
     assert.equal(outputs.get("ref"), "fork-commit");
     assert.match(outputs.get("version"), /^0\.1\.7-nightly\.\d{8}\.42$/);
     assert.equal(outputs.get("tag"), `v${outputs.get("version")}`);
     assert.equal(outputs.get("build"), "true");
     assert.deepEqual(reads, ["apps/desktop/package.json", ".env.example"]);
+    assert.equal(verificationPaths.length, identity.provenance ? 1 : 0);
+    for (const path of verificationPaths) assert.equal(existsSync(dirname(path)), false);
+  }
+  for (const provenance of [
+    null,
+    "error",
+    { ...validProvenance, repository: "attacker/t3code" },
+    { ...validProvenance, ref: "refs/heads/feature" },
+    { ...validProvenance, workflow: "alexander-cato/t3code/.github/workflows/other.yml" },
+    { ...validProvenance, hosted: false },
+    { ...validProvenance, subject: "different-commit\n" },
+  ]) {
+    const { run, outputs, reads, verificationPaths } = fixture({
+      committer: "web-flow",
+      author: "github-actions[bot]",
+      provenance,
+    });
+    await assert.rejects(run(), /attestation|provenance/i);
+    assert.equal(outputs.size, 0);
+    assert.deepEqual(reads, []);
+    assert.equal(verificationPaths.length, 1);
+    assert.equal(existsSync(dirname(verificationPaths[0])), false);
   }
 });
 

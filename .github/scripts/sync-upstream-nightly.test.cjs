@@ -21,6 +21,8 @@ const resolve = new AsyncFunction(
   "github",
   "context",
   "core",
+  "exec",
+  "require",
   script.replace(/^            /gm, ""),
 );
 const nightly = {
@@ -28,6 +30,13 @@ const nightly = {
   published_at: "2026-11-03T18:43:24Z",
   draft: false,
   target_commitish: "main",
+};
+const validProvenance = {
+  repository: "alexander-cato/t3code",
+  ref: "refs/heads/main",
+  workflow: "alexander-cato/t3code/.github/workflows/sync-upstream-nightly.yml",
+  hosted: true,
+  subject: "fork-commit\n",
 };
 
 function fixture({
@@ -37,9 +46,35 @@ function fixture({
   committer = "alexander-cato",
   author = "alexander-cato",
   sourceSha = "fork-commit",
+  provenance = null,
 } = {}) {
   const calls = [];
   const outputs = new Map();
+  const verificationPaths = [];
+  const exec = {
+    async exec(command, args) {
+      assert.equal(command, "gh");
+      assert.deepEqual(args.slice(0, 2), ["attestation", "verify"]);
+      assert.deepEqual(args.slice(3), [
+        "--repo",
+        validProvenance.repository,
+        "--source-ref",
+        validProvenance.ref,
+        "--signer-workflow",
+        validProvenance.workflow,
+        "--deny-self-hosted-runners",
+      ]);
+      verificationPaths.push(args[2]);
+      const subject = readFileSync(args[2], "utf8");
+      if (provenance === "error") throw new Error("verification unavailable");
+      return provenance &&
+        Object.keys(validProvenance).every(
+          (key) => provenance[key] === (key === "subject" ? subject : validProvenance[key]),
+        )
+        ? 0
+        : 1;
+    },
+  };
   const github = {
     rest: {
       repos: {
@@ -79,7 +114,12 @@ function fixture({
       outputs.set(key, value);
     },
   };
-  return { run: () => resolve(github, context, core), calls, outputs };
+  return {
+    run: () => resolve(github, context, core, exec, require),
+    calls,
+    outputs,
+    verificationPaths,
+  };
 }
 
 test("resolves the newest published nightly tag to an immutable commit", async () => {
@@ -106,13 +146,19 @@ test("resolves the newest published nightly tag to an immutable commit", async (
   assert.equal(outputs.get("tag"), nightly.tag_name);
   assert.equal(outputs.get("fork_ref"), "fork-commit");
   for (const identity of [
-    { committer: "github-actions[bot]", author: "github-actions[bot]" },
+    {
+      committer: "github-actions[bot]",
+      author: "github-actions[bot]",
+      provenance: validProvenance,
+    },
     { committer: "web-flow", author: "alexander-cato" },
-    { committer: "web-flow", author: "github-actions[bot]" },
+    { committer: "web-flow", author: "github-actions[bot]", provenance: validProvenance },
   ]) {
     const accepted = fixture(identity);
     await accepted.run();
     assert.equal(accepted.outputs.get("fork_ref"), "fork-commit");
+    assert.equal(accepted.verificationPaths.length, identity.provenance ? 1 : 0);
+    for (const path of accepted.verificationPaths) assert.equal(existsSync(dirname(path)), false);
   }
 });
 
@@ -133,6 +179,22 @@ test("fails closed without a nightly, with an untrusted fork head, or on feature
     await assert.rejects(rejected.run(), /verified.*alexander-cato|SHA/);
     assert.equal(rejected.outputs.size, 0);
     assert.equal(rejected.calls.length, 1);
+  }
+  for (const provenance of [
+    null,
+    "error",
+    { ...validProvenance, repository: "attacker/t3code" },
+    { ...validProvenance, ref: "refs/heads/feature" },
+    { ...validProvenance, workflow: "alexander-cato/t3code/.github/workflows/other.yml" },
+    { ...validProvenance, hosted: false },
+    { ...validProvenance, subject: "different-commit\n" },
+  ]) {
+    const rejected = fixture({ committer: "web-flow", author: "github-actions[bot]", provenance });
+    await assert.rejects(rejected.run(), /attestation|provenance/i);
+    assert.equal(rejected.outputs.size, 0);
+    assert.equal(rejected.calls.length, 1);
+    assert.equal(rejected.verificationPaths.length, 1);
+    assert.equal(existsSync(dirname(rejected.verificationPaths[0])), false);
   }
 });
 
@@ -226,12 +288,18 @@ process.stdout.write(JSON.stringify(response));
     git("commit", "-m", "upstream nightly");
     const upstream = git("rev-parse", "HEAD");
     git("checkout", "fork/nightly");
-    const run = () =>
-      spawnSync("bash", [join(__dirname, "sync-upstream-nightly.sh"), upstream, nightly.tag_name], {
-        cwd: directory,
-        env,
-        encoding: "utf8",
-      });
+    const run = () => {
+      rmSync(env.GITHUB_OUTPUT, { force: true });
+      return spawnSync(
+        "bash",
+        [join(__dirname, "sync-upstream-nightly.sh"), upstream, nightly.tag_name],
+        {
+          cwd: directory,
+          env,
+          encoding: "utf8",
+        },
+      );
+    };
     const output = () =>
       Object.fromEntries(
         readFileSync(env.GITHUB_OUTPUT, "utf8")
@@ -252,6 +320,7 @@ test("merges source and fork customizations while preserving every fork workflow
     const { sha: synced, base, changed } = output();
     assert.equal(base, fork);
     assert.equal(changed, "true");
+    assert.equal(output().attestation_sha, synced);
     assert.equal(git("rev-parse", "HEAD"), fork);
     assert.equal(git("status", "--porcelain"), "");
     assert.equal(git("show", `${synced}:source.txt`), "upstream source");
@@ -268,6 +337,7 @@ test("merges source and fork customizations while preserving every fork workflow
     assert.equal(run().status, 0);
     assert.equal(git("rev-parse", "HEAD"), synced);
     assert.equal(output().changed, "false");
+    assert.equal(output().attestation_sha, undefined);
     const refs = git("for-each-ref", "--format=%(refname):%(objectname)");
     env.VERIFY_SYNC_SIGNING = "true";
     const proof = run();
@@ -282,6 +352,7 @@ test("merges source and fork customizations while preserving every fork workflow
     assert.equal(git("for-each-ref", "--format=%(refname):%(objectname)"), refs);
     assert.equal(git("status", "--porcelain"), "");
     assert.equal(output().changed, "false");
+    assert.equal(output().attestation_sha, proofSha);
     rmSync(env.GITHUB_OUTPUT);
     env.TEST_VERIFICATION = "false";
     const rejected = run();
