@@ -19,10 +19,20 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     steps:
+      - name: Require patched provenance verifier
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(gh --version | head -n 1 | cut -d ' ' -f 3)"
+          dpkg --compare-versions "$version" ge 2.102.0
       - id: nightly
         name: Resolve the latest published upstream nightly
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          GH_TOKEN: ${{ github.token }}
         with:
           script: |
             const defaultBranch = context.payload.repository.default_branch;
@@ -39,6 +49,29 @@ jobs:
               (committer === 'web-flow' && ['alexander-cato', 'github-actions[bot]'].includes(source.author?.login));
             if (source.commit?.verification?.verified !== true || !trustedCommitter) {
               throw new Error(`Refusing fork/nightly ${forkRef}: require a GitHub-verified commit by alexander-cato or github-actions[bot]. Review and restore the branch to a trusted signed commit before syncing.`);
+            }
+            const automatedCommit = committer === 'github-actions[bot]' || committer === 'web-flow';
+            if (automatedCommit) {
+              const fs = require('node:fs/promises');
+              const { join } = require('node:path');
+              const { tmpdir } = require('node:os');
+              const directory = await fs.mkdtemp(join(tmpdir(), 't3-sync-provenance-'));
+              try {
+                const subject = join(directory, 'fork-nightly-commit.txt');
+                await fs.writeFile(subject, `${forkRef}\n`);
+                const exitCode = await exec.exec('gh', [
+                  'attestation', 'verify', subject,
+                  '--repo', 'alexander-cato/t3code',
+                  '--source-ref', 'refs/heads/main',
+                  '--signer-workflow', 'alexander-cato/t3code/.github/workflows/sync-upstream-nightly.yml',
+                  '--deny-self-hosted-runners',
+                ], { silent: true, ignoreReturnCode: true });
+                if (exitCode !== 0) throw new Error('Attestation verification failed.');
+              } catch (cause) {
+                throw new Error(`Refusing automated fork/nightly ${forkRef}: require provenance from this repository's hosted main-branch nightly sync. Restore a trusted owner-signed commit before rerunning sync.`, { cause });
+              } finally {
+                await fs.rm(directory, { recursive: true, force: true });
+              }
             }
 
             const upstream = { owner: 'pingdotgg', repo: 't3code' };
@@ -91,24 +124,54 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           bash "$RUNNER_TEMP/sync-upstream-nightly.sh" "$UPSTREAM_SHA" "$NIGHTLY_TAG"
 
+      - name: Prepare sync provenance subject
+        if: steps.merge.outputs.attestation_sha != ''
+        env:
+          ATTESTATION_SHA: ${{ steps.merge.outputs.attestation_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$ATTESTATION_SHA" =~ ^[0-9a-f]{40}$ ]]
+          printf '%s\n' "$ATTESTATION_SHA" > "$RUNNER_TEMP/fork-nightly-commit.txt"
+
+      - name: Attest sync commit provenance
+        if: steps.merge.outputs.attestation_sha != ''
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: ${{ runner.temp }}/fork-nightly-commit.txt
+          create-storage-record: false
+
+      - id: verify_provenance
+        name: Verify sync commit provenance
+        if: steps.merge.outputs.attestation_sha != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh attestation verify "$RUNNER_TEMP/fork-nightly-commit.txt" \
+            --repo alexander-cato/t3code \
+            --source-ref refs/heads/main \
+            --signer-workflow alexander-cato/t3code/.github/workflows/sync-upstream-nightly.yml \
+            --deny-self-hosted-runners
+
       - name: Publish verified sync commit
-        if: steps.merge.outputs.changed == 'true'
+        if: steps.merge.outputs.changed == 'true' && steps.verify_provenance.outcome == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
           SYNC_SHA: ${{ steps.merge.outputs.sha }}
           SYNC_BASE: ${{ steps.merge.outputs.base }}
+          ATTESTATION_SHA: ${{ steps.merge.outputs.attestation_sha }}
           UPSTREAM_SHA: ${{ steps.nightly.outputs.sha }}
         run: |
           set -euo pipefail
           [[ "$SYNC_SHA" =~ ^[0-9a-f]{40}$ && "$SYNC_BASE" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$SYNC_SHA" == "$ATTESTATION_SHA" ]]
           current="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/fork/nightly" --jq .object.sha)"
           if [[ "$current" != "$SYNC_BASE" ]]; then
             echo "fork/nightly changed during sync; rerun instead of overwriting it." >&2
             exit 1
           fi
           gh api "repos/$GITHUB_REPOSITORY/git/commits/$SYNC_SHA" > "$RUNNER_TEMP/sync-commit.json"
-          jq -e --arg base "$SYNC_BASE" --arg upstream "$UPSTREAM_SHA" \
-            '.verification.verified == true and ([.parents[].sha] == [$base, $upstream])' \
+          jq -e --arg sha "$SYNC_SHA" --arg base "$SYNC_BASE" --arg upstream "$UPSTREAM_SHA" \
+            '.sha == $sha and .verification.verified == true and ([.parents[].sha] == [$base, $upstream])' \
             "$RUNNER_TEMP/sync-commit.json" >/dev/null
           gh api --method PATCH "repos/$GITHUB_REPOSITORY/git/refs/heads/fork/nightly" \
             -f sha="$SYNC_SHA" -F force=false

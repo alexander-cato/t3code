@@ -37,13 +37,16 @@ if git rev-parse --verify -q MERGE_HEAD >/dev/null; then
   synced="$(node "$script_dir/create-nightly-sync-commit.cjs" "$before" "$upstream_commit" "$tree" "$nightly_tag")"
   cleanup_merge
   if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
-    printf 'changed=true\nsha=%s\nbase=%s\n' "$synced" "$before" >> "$GITHUB_OUTPUT"
+    printf 'changed=true\nsha=%s\nbase=%s\nattestation_sha=%s\n' "$synced" "$before" "$synced" >> "$GITHUB_OUTPUT"
   fi
   echo "Prepared verified nightly sync commit $synced; fork/nightly has not been updated."
 else
   if [[ "${VERIFY_SYNC_SIGNING:-}" == true ]]; then
     tree="$(git rev-parse "$before^{tree}")"
     proof="$(node "$script_dir/create-nightly-sync-commit.cjs" "$before" "$upstream_commit" "$tree" "$nightly_tag")"
+    if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+      printf 'attestation_sha=%s\n' "$proof" >> "$GITHUB_OUTPUT"
+    fi
     echo "Verified GitHub bot signing with unreferenced commit $proof; no refs were updated."
   fi
   if [[ -n "${GITHUB_OUTPUT:-}" ]]; then

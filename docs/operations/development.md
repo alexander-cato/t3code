@@ -206,8 +206,10 @@ the workflow in GitHub Actions to stop syncing. GitHub may disable schedules aft
 repository inactivity; re-enable the workflow there if needed.
 
 The sync uses GitHub Actions' built-in token with Contents write permission; no personal token is
-needed. It preserves the fork's entire `.github/workflows/` directory, including workflows upstream
-adds or removes. Upstream source changes and merge ancestry are retained, but upstream workflow
+needed. Sync commits are GitHub-signed and carry provenance from this repository's `main` workflow
+on a hosted runner. Release source accepts Verified owner commits; GitHub-generated commits also
+require that provenance. It preserves the fork's entire `.github/workflows/` directory, including
+workflows upstream adds or removes. Upstream source changes and merge ancestry are retained, but upstream workflow
 updates must be reviewed and applied separately. The workflow executes its sync script from the
 trusted default-branch commit, not from the upstream code it just merged. Pushes made with the
 built-in token do not start other push workflows; the fork build follows the sync's completion.
@@ -223,7 +225,8 @@ Use **Import and restart** for an independent copy with rollback, or **Keep conn
 same running environment from both apps. App profiles and permissions remain separate. Install the
 fork DMG alongside the existing Nightly app. The fork's update feed points only at this fork's releases.
 
-For automatic app updates, configure the Actions secrets `CSC_LINK`, `CSC_KEY_PASSWORD`,
+For automatic app updates, create a `fork-release` Actions environment restricted to the `main`
+branch. Configure its environment secrets `CSC_LINK`, `CSC_KEY_PASSWORD`,
 `APPLE_API_KEY`, `APPLE_API_KEY_ID`, `APPLE_API_ISSUER`, and `MACOS_PROVISIONING_PROFILE`, plus the
 `APPLE_TEAM_ID` repository variable. The certificate, profile and associated domains must belong to
 your Apple team and the fork's `com.alexandercato.t3code.fork` app ID. See the signing steps in
