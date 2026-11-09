@@ -43,6 +43,7 @@ import {
 import { loadRepoEnv } from "./lib/public-config.ts";
 import { selectDesktopRuntimeExternalDependencies } from "./lib/desktop-external-packages.ts";
 import { resolveCatalogDependencies } from "./lib/resolve-catalog.ts";
+import { prepareStageLockfile } from "./lib/stage-lockfile.ts";
 
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -984,7 +985,7 @@ interface StagePackageJson {
   };
 }
 
-export const STAGE_INSTALL_ARGS = ["install", "--prod"] as const;
+export const STAGE_INSTALL_ARGS = ["install", "--prod", "--frozen-lockfile"] as const;
 export const DESKTOP_ELECTRON_LANGUAGES = ["en-US"] as const;
 export const DESKTOP_FILE_EXCLUSIONS = [
   // Cursor walks from argv[1] to platform assets; helpers and native addons need real paths outside ASAR.
@@ -2789,6 +2790,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
 ) {
   const fork = yield* DesktopForkConfig;
   const buildConfig: Record<string, unknown> = {
+    forceCodeSigning: signed,
     afterPack: (yield* Path.Path).join(yield* RepoRoot, "scripts/prepare-server-compile-cache.cjs"),
     appId: fork ? desktopForkIdentity.appId : DESKTOP_APP_ID,
     productName: resolveDesktopProductName(version, fork),
@@ -3159,6 +3161,7 @@ export const stageWindowsServerSidecar = Effect.fn("stageWindowsServerSidecar")(
   }
 
   yield* Effect.log("[desktop-artifact] Installing server sidecar runtime externals...");
+  yield* prepareStageLockfile(input.repoRoot, serverStageDir);
   const installCommand = yield* resolveSpawnCommand("vp", [...STAGE_INSTALL_ARGS]);
   yield* runCommand(
     ChildProcess.make(installCommand.command, installCommand.args, {
@@ -3560,8 +3563,56 @@ export class MacPackagedAppMissingError extends Schema.TaggedError<MacPackagedAp
   }
 }
 
+export class MacPackagedAppSigningError extends Schema.TaggedError<MacPackagedAppSigningError>()(
+  "MacPackagedAppSigningError",
+  { appPath: Schema.String, reason: Schema.String },
+) {
+  override get message(): string {
+    return `Signed macOS app validation failed for ${this.appPath}: ${this.reason}`;
+  }
+}
+
+const validateMacPackagedAppSignature = Effect.fn(
+  "desktopArtifact.validateMacPackagedAppSignature",
+)(function* (appPath: string, expected: { readonly teamId: string; readonly appId: string }) {
+  const requirement = `=anchor apple generic and identifier "${expected.appId}" and certificate leaf[subject.OU] = "${expected.teamId}" and certificate leaf[field.1.2.840.113635.100.6.1.13] exists`;
+  for (const [command, args] of [
+    ["codesign", ["--verify", "--deep", "--strict", "--test-requirement", requirement, appPath]],
+    ["spctl", ["--assess", "--type", "execute", appPath]],
+    ["xcrun", ["stapler", "validate", appPath]],
+  ] as const) {
+    const result = yield* spawnAndCollectOutput(ChildProcess.make(command, args));
+    if (result.exitCode !== 0) {
+      return yield* new MacPackagedAppSigningError({
+        appPath,
+        reason: `${command} rejected the app`,
+      });
+    }
+  }
+  const identity = yield* spawnAndCollectOutput(
+    ChildProcess.make("codesign", ["--display", "--verbose=4", appPath]),
+  );
+  const output = `${identity.stdout}\n${identity.stderr}`;
+  if (
+    identity.exitCode !== 0 ||
+    !output.split(/\r?\n/).includes(`Identifier=${expected.appId}`) ||
+    !output.split(/\r?\n/).includes(`TeamIdentifier=${expected.teamId}`) ||
+    !/^Authority=Developer ID Application:/m.test(output)
+  ) {
+    return yield* new MacPackagedAppSigningError({
+      appPath,
+      reason: "expected Developer ID Application signature, Team ID, and bundle ID were not found",
+    });
+  }
+});
+
 export const validateMacPackagedPayload = Effect.fn("desktopArtifact.validateMacPackagedPayload")(
-  function* (input: { readonly stageDistDir: string; readonly verbose?: boolean }) {
+  function* (input: {
+    readonly stageDistDir: string;
+    readonly verbose?: boolean;
+    readonly verifyBundle?: boolean;
+    readonly expectedSigning?: { readonly teamId: string; readonly appId: string };
+  }) {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const asarPaths: string[] = [];
@@ -3579,7 +3630,15 @@ export const validateMacPackagedPayload = Effect.fn("desktopArtifact.validateMac
       return yield* new MacPackagedAppMissingError({ stageDistDir: input.stageDistDir });
     }
     for (const asarPath of asarPaths) {
-      yield* verifyPackagedBundleIsSelfContained({ asarPath, verbose: input.verbose ?? false });
+      if (input.expectedSigning) {
+        yield* validateMacPackagedAppSignature(
+          path.dirname(path.dirname(path.dirname(asarPath))),
+          input.expectedSigning,
+        );
+      }
+      if (input.verifyBundle !== false) {
+        yield* verifyPackagedBundleIsSelfContained({ asarPath, verbose: input.verbose ?? false });
+      }
     }
     yield* Effect.log(
       `[desktop-artifact] Validated macOS payload (${String(asarPaths.length)} app bundle(s)).`,
@@ -3938,6 +3997,7 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
   }
 
   yield* Effect.log("[desktop-artifact] Installing staged production dependencies...");
+  yield* prepareStageLockfile(repoRoot, stageAppDir);
   const installCommand = yield* resolveSpawnCommand("vp", [...STAGE_INSTALL_ARGS]);
   yield* runCommand(
     ChildProcess.make(installCommand.command, installCommand.args, {
@@ -4083,8 +4143,16 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
     });
   }
   // x64 builds on arm64 runners; the arm64 check covers the shared JS bundle.
-  if (options.platform === "mac" && options.arch === "arm64" && hostPlatform === "darwin") {
-    yield* validateMacPackagedPayload({ stageDistDir, verbose: options.verbose });
+  if (
+    options.platform === "mac" &&
+    (options.signed || (options.arch === "arm64" && hostPlatform === "darwin"))
+  ) {
+    yield* validateMacPackagedPayload({
+      stageDistDir,
+      verbose: options.verbose,
+      verifyBundle: options.arch === "arm64" && hostPlatform === "darwin",
+      ...(macPasskeySigning ? { expectedSigning: macPasskeySigning } : {}),
+    });
   }
 
   const copiedArtifacts = yield* copyDesktopBuildArtifacts(

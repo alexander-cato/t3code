@@ -88,22 +88,12 @@ jobs:
       - id: signing
         name: Check signing availability
         env:
-          CSC_LINK: ${{ secrets.CSC_LINK }}
-          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
-          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
-          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
-          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
-          MACOS_PROVISIONING_PROFILE: ${{ secrets.MACOS_PROVISIONING_PROFILE }}
+          SIGNING_CONFIGURED: ${{ secrets.CSC_LINK != '' && secrets.CSC_KEY_PASSWORD != '' && secrets.APPLE_API_KEY != '' && secrets.APPLE_API_KEY_ID != '' && secrets.APPLE_API_ISSUER != '' && vars.APPLE_TEAM_ID != '' && secrets.MACOS_PROVISIONING_PROFILE != '' }}
         run: |
-          for key in CSC_LINK CSC_KEY_PASSWORD APPLE_API_KEY APPLE_API_KEY_ID APPLE_API_ISSUER APPLE_TEAM_ID MACOS_PROVISIONING_PROFILE; do
-            if [[ -z "${!key}" ]]; then
-              echo "signed=false" >> "$GITHUB_OUTPUT"
-              echo "Signing is not configured; this build is for manual installation and has no auto-update feed."
-              exit 0
-            fi
-          done
-          echo "signed=true" >> "$GITHUB_OUTPUT"
+          echo "signed=$SIGNING_CONFIGURED" >> "$GITHUB_OUTPUT"
+          if [[ "$SIGNING_CONFIGURED" != true ]]; then
+            echo "Signing is not configured; this build is for manual installation and has no auto-update feed."
+          fi
 
   bundle:
     needs: resolve
@@ -155,7 +145,13 @@ jobs:
       actions: read
       contents: read
     uses: ./.github/workflows/release-desktop.yml
-    secrets: inherit
+    secrets:
+      CSC_LINK: ${{ secrets.CSC_LINK }}
+      CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+      APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+      APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+      APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+      MACOS_PROVISIONING_PROFILE: ${{ secrets.MACOS_PROVISIONING_PROFILE }}
     with:
       desktop_fork: true
       label: Fork macOS arm64

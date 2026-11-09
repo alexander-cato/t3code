@@ -1433,6 +1433,49 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     ),
   );
 
+  it.effect("requires the expected notarized signature for signed macOS payloads", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fixture = yield* makeMacPayloadFixture({});
+        for (const failure of [
+          undefined,
+          "codesign",
+          "identity",
+          "bundleId",
+          "certificate",
+          "spctl",
+          "stapler",
+        ]) {
+          const spawner = ChildProcessSpawner.make((command) => {
+            assert.isTrue(ChildProcess.isStandardCommand(command));
+            const executable = ChildProcess.isStandardCommand(command) ? command.command : "";
+            const identity = `Identifier=${failure === "bundleId" ? "com.t3tools.t3code" : "com.alexandercato.t3code.fork"}\nTeamIdentifier=${failure === "identity" ? "OTHERTEAM1" : "5Y33T3HS8S"}\nAuthority=${failure === "certificate" ? "Apple Development:" : "Developer ID Application:"} Test\n`;
+            const rejected =
+              failure !== undefined &&
+              (executable.endsWith(failure) ||
+                (ChildProcess.isStandardCommand(command) && command.args[0] === failure));
+            return Effect.succeed(mockProcess(rejected ? 1 : 0, identity));
+          });
+          const result = yield* validateMacPackagedPayload({
+            stageDistDir: fixture.stageDistDir,
+            expectedSigning: {
+              teamId: "5Y33T3HS8S",
+              appId: "com.alexandercato.t3code.fork",
+            },
+          }).pipe(
+            Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+            Effect.exit,
+          );
+          assert.equal(
+            Exit.isFailure(result),
+            failure !== undefined,
+            `signature result for ${failure ?? "valid app"}`,
+          );
+        }
+      }),
+    ),
+  );
+
   it.effect("rejects a macOS stage without a packaged app", () =>
     Effect.scoped(
       Effect.gen(function* () {

@@ -122,6 +122,10 @@ permissions:
 jobs:
   build:
     name: Build ${{ inputs.label }}
+    if: >-
+      github.repository != 'alexander-cato/t3code' ||
+      (inputs.desktop_fork && github.ref == 'refs/heads/main' &&
+      (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_run'))
     runs-on: ${{ inputs.runner }}
     # Windows waits for the Linux CLI archive inside its own budget (see
     # "Wait for Linux CLI archive"), so it gets that wait on top of the usual 30.
