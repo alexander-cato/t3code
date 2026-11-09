@@ -538,6 +538,10 @@
     "./provider-instance-ids": {
       "types": "./src/providerInstanceIds.ts",
       "default": "./src/providerInstanceIds.ts"
+    },
+    "./state/virtual-machines": {
+      "types": "./src/state/virtualMachines.ts",
+      "default": "./src/state/virtualMachines.ts"
     }
   },
   "scripts": {
