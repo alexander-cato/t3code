@@ -21,13 +21,18 @@ import {
   type RunId,
   RuntimeMode,
   ThreadId,
+  VirtualMachineError,
 } from "@t3tools/contracts";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 
 import packageJson from "../../package.json" with { type: "json" };
 import { parseBearerToken } from "../auth/EnvironmentAuth.ts";
 import * as ServerConfig from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as DeviceService from "../device/DeviceService.ts";
+import * as VirtualMachineService from "../vm/VirtualMachineService.ts";
+import * as VmHandlers from "./toolkits/vm/handlers.ts";
+import { VmControlTool, VmControlToolkit, VmStandardToolkit } from "./toolkits/vm/tools.ts";
 import * as HtmlRender from "../htmlRender/HtmlRender.ts";
 import * as ThreadCommandExecutor from "../orchestration-v2/ThreadCommandExecutor.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
@@ -766,8 +771,58 @@ const registerImageTool = Effect.fn("McpHttpServer.registerImageTool")(function*
   });
 });
 
+// Guest calls already return MCP content, including images, resources and tool errors.
+// The standard toolkit wrapper would nest this envelope inside structuredContent.
+const decodeVmControlResult = Schema.decodeUnknownEffect(McpSchema.CallToolResult);
+const registerVmControl = Effect.fn("McpHttpServer.registerVmControl")(function* () {
+  const server = yield* McpServer.McpServer;
+  const vms = yield* VirtualMachineService.VirtualMachineService;
+  const threads = yield* ThreadManagementService.ThreadManagementService;
+  const built = yield* decodeAsAdvertised(VmControlToolkit);
+  yield* server.addTool({
+    tool: new McpSchema.Tool({
+      name: VmControlTool.name,
+      description: Tool.getDescription(VmControlTool),
+      inputSchema: Tool.getJsonSchema(VmControlTool),
+      annotations: { readOnlyHint: false },
+    }),
+    annotations: VmControlTool.annotations,
+    handle: (payload) =>
+      Effect.withFiber((fiber) => {
+        const invocation = Context.getUnsafe(
+          fiber.context,
+          McpInvocationContext.McpInvocationContext,
+        );
+        return built.handle("vm_control", payload).pipe(
+          Stream.unwrap,
+          Stream.run(Sink.last()),
+          Effect.flatMap(Effect.fromOption),
+          Effect.flatMap(({ encodedResult }) => decodeVmControlResult(encodedResult)),
+          Effect.provideService(VirtualMachineService.VirtualMachineService, vms),
+          Effect.provideService(ThreadManagementService.ThreadManagementService, threads),
+          Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+          Effect.catchCause(
+            imageToolFailure(
+              "vm_control",
+              "control",
+              vmToolFailureText("Virtual machine control failed."),
+            ),
+          ),
+        );
+      }),
+  });
+});
+
+// These messages are fixed per reason and never carry guest or Cua output.
+const vmToolFailureText = (fallback: string) => (error: unknown) =>
+  isVirtualMachineError(error) || isDeviceToolError(error) || isOrchestratorMcpFailure(error)
+    ? error.message
+    : fallback;
+const isVirtualMachineError = Schema.is(VirtualMachineError);
+
 const registerDeviceScreenshot = Effect.fn("McpHttpServer.registerDeviceScreenshot")(function* () {
   const devices = yield* DeviceService.DeviceService;
+  const vms = yield* VirtualMachineService.VirtualMachineService;
   const threads = yield* ThreadManagementService.ThreadManagementService;
   const built = yield* decodeAsAdvertised(DeviceScreenshotToolkit);
   yield* registerImageTool(
@@ -779,12 +834,15 @@ const registerDeviceScreenshot = Effect.fn("McpHttpServer.registerDeviceScreensh
     (effect) =>
       effect.pipe(
         Effect.provideService(DeviceService.DeviceService, devices),
+        Effect.provideService(VirtualMachineService.VirtualMachineService, vms),
         Effect.provideService(ThreadManagementService.ThreadManagementService, threads),
       ),
     "screenshot",
     (error) => {
       if (!isDeviceToolError(error)) {
-        return isOrchestratorMcpFailure(error) ? error.message : "Device screenshot failed.";
+        return isOrchestratorMcpFailure(error) || isVirtualMachineError(error)
+          ? error.message
+          : "Device screenshot failed.";
       }
       return error._tag === "DeviceOperationError" && error.reason === "hub_rejected"
         ? `${error.message} Call device_list to check the device state, and device_open if it needs to be reopened.`
@@ -1218,6 +1276,19 @@ export const layerInProcessMcpServer = McpServer.middleware<{
   { global: true },
 ).pipe(Layer.provideMerge(McpServer.McpServer.layer));
 
+// Lume VMs need Apple silicon, so other hosts leave these descriptions out of every tool list.
+export const layerVmToolkit = Layer.unwrap(
+  Effect.gen(function* () {
+    const supported =
+      (yield* HostProcess.Platform) === "darwin" && (yield* HostProcess.Architecture) === "arm64";
+    if (!supported) return Layer.empty;
+    return Layer.mergeAll(
+      toolkitRegistration(VmStandardToolkit, VmHandlers.layerStandard),
+      imageToolRegistration(registerVmControl(), VmHandlers.layerControl),
+    );
+  }),
+);
+
 export const layerMcpTransport = <RA, RE, RR>(registrations: Layer.Layer<RA, RE, RR>) =>
   McpServer.layerHttp({
     name: "T3 Code",
@@ -1240,6 +1311,7 @@ export const layerTools = Layer.mergeAll(
   layerWorktreeToolkitRegistration,
   layerPullRequestsToolkit,
   layerDeviceToolkit,
+  layerVmToolkit,
   layerHtmlToolkit,
 );
 

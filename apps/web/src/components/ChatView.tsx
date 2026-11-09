@@ -1935,7 +1935,7 @@ export default function ChatView(props: ChatViewProps) {
     activeThreadRef &&
     activePreviewMiniPlayer &&
     previewMiniPlayerVisible &&
-    (activePreviewMiniPlayer.source.kind === "device" || canOperatePreview)
+    (activePreviewMiniPlayer.source.kind !== "browser" || canOperatePreview)
       ? activePreviewMiniPlayer
       : null;
   const canvasPreview = useThreadPreviewCanvasSource(activeThreadRef, shownPreviewMiniPlayer);
@@ -3223,6 +3223,7 @@ export default function ChatView(props: ChatViewProps) {
   const rightPanelContent = activeThreadRef ? (
     <RightPanelSurfaceContent
       surface={renderedRightPanelSurface}
+      surfaces={renderedRightPanelSurfaces}
       activeSurfaceId={activeRightPanelSurface?.id ?? null}
       threadRef={activeThreadRef}
       environmentId={activeThread.environmentId}
