@@ -62,11 +62,15 @@ jobs:
           git sparse-checkout set --no-cone '/*' '!/.repos/'
           git checkout -b nightly-sync refs/remotes/origin/fork/nightly
           git show "$WORKFLOW_SHA":.github/scripts/sync-upstream-nightly.sh > "$RUNNER_TEMP/sync-upstream-nightly.sh"
+          git show "$WORKFLOW_SHA":.github/scripts/create-nightly-sync-commit.cjs > "$RUNNER_TEMP/create-nightly-sync-commit.cjs"
 
-      - name: Merge source while preserving fork workflows
+      - id: merge
+        name: Merge source while preserving fork workflows
         env:
           UPSTREAM_SHA: ${{ steps.nightly.outputs.sha }}
           NIGHTLY_TAG: ${{ steps.nightly.outputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+          VERIFY_SYNC_SIGNING: ${{ github.event_name == 'workflow_dispatch' }}
         run: |
           set -euo pipefail
           git fetch --no-tags --filter=blob:none https://github.com/pingdotgg/t3code.git "$UPSTREAM_SHA"
@@ -74,10 +78,24 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           bash "$RUNNER_TEMP/sync-upstream-nightly.sh" "$UPSTREAM_SHA" "$NIGHTLY_TAG"
 
-      - name: Push synced fork branch
+      - name: Publish verified sync commit
+        if: steps.merge.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          SYNC_SHA: ${{ steps.merge.outputs.sha }}
+          SYNC_BASE: ${{ steps.merge.outputs.base }}
+          UPSTREAM_SHA: ${{ steps.nightly.outputs.sha }}
         run: |
           set -euo pipefail
-          gh auth setup-git
-          git push origin HEAD:refs/heads/fork/nightly
+          [[ "$SYNC_SHA" =~ ^[0-9a-f]{40}$ && "$SYNC_BASE" =~ ^[0-9a-f]{40}$ ]]
+          current="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/fork/nightly" --jq .object.sha)"
+          if [[ "$current" != "$SYNC_BASE" ]]; then
+            echo "fork/nightly changed during sync; rerun instead of overwriting it." >&2
+            exit 1
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/git/commits/$SYNC_SHA" > "$RUNNER_TEMP/sync-commit.json"
+          jq -e --arg base "$SYNC_BASE" --arg upstream "$UPSTREAM_SHA" \
+            '.verification.verified == true and ([.parents[].sha] == [$base, $upstream])' \
+            "$RUNNER_TEMP/sync-commit.json" >/dev/null
+          gh api --method PATCH "repos/$GITHUB_REPOSITORY/git/refs/heads/fork/nightly" \
+            -f sha="$SYNC_SHA" -F force=false

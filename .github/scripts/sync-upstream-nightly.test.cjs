@@ -1,6 +1,7 @@
 const assert = require("node:assert/strict");
 const { spawnSync } = require("node:child_process");
 const {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -94,6 +95,9 @@ function withRepository(body) {
     GIT_CONFIG_GLOBAL: "/dev/null",
     GIT_CONFIG_NOSYSTEM: "1",
     GITHUB_STEP_SUMMARY: "",
+    GITHUB_REPOSITORY: "fixture/nightly",
+    GITHUB_OUTPUT: join(directory, ".git/github-output"),
+    PATH: `${join(directory, ".git/test-bin")}:${process.env.PATH}`,
   };
   const git = (...args) => {
     const result = spawnSync("git", ["-c", "core.hooksPath=/dev/null", ...args], {
@@ -113,7 +117,44 @@ function withRepository(body) {
     git("init", "-b", "main");
     git("config", "user.name", "Nightly fixture");
     git("config", "user.email", "fixture@example.com");
+    write(
+      ".git/test-bin/gh",
+      `#!/usr/bin/env node
+const { execFileSync } = require("node:child_process");
+const { appendFileSync, readFileSync } = require("node:fs");
+const assert = require("node:assert/strict");
+const args = process.argv.slice(2);
+assert.equal(args[0], "api");
+assert.equal(args[args.indexOf("--method") + 1], "POST");
+const endpoint = args[1];
+const body = JSON.parse(readFileSync(0, "utf8"));
+appendFileSync(".git/api-calls", JSON.stringify({ endpoint, body }) + "\\n");
+const git = (args, input) => execFileSync("git", args, { input, encoding: "utf8" }).trim();
+let response;
+if (endpoint.endsWith("/git/blobs")) {
+  assert.equal(body.encoding, "base64");
+  response = { sha: git(["hash-object", "-t", "blob", "-w", "--stdin"], Buffer.from(body.content, "base64")) };
+} else if (endpoint.endsWith("/git/trees")) {
+  const entries = body.tree.map(({ mode, type, sha, path }) => mode + " " + type + " " + sha + "\\t" + path + "\\0").join("");
+  response = { sha: git(["mktree", "-z", "--missing"], entries) };
+} else if (endpoint.endsWith("/git/commits")) {
+  assert.deepEqual(Object.keys(body).sort(), ["message", "parents", "tree"]);
+  const sha = git(["-c", "commit.gpgsign=false", "commit-tree", body.tree, ...body.parents.flatMap((parent) => ["-p", parent])], body.message);
+  response = { sha, tree: { sha: body.tree }, parents: body.parents.map((sha) => ({ sha })), verification: { verified: true } };
+  if (process.env.TEST_VERIFICATION === "false") response.verification.verified = false;
+  if (process.env.TEST_VERIFICATION === "missing") delete response.verification;
+  if (process.env.TEST_VERIFICATION === "string") response.verification.verified = "true";
+  if (process.env.TEST_VERIFICATION === "wrong-parent") response.parents.reverse();
+  if (process.env.TEST_VERIFICATION === "wrong-tree") response.tree.sha = body.parents[0];
+} else {
+  throw Error("Unexpected API endpoint: " + endpoint);
+}
+process.stdout.write(JSON.stringify(response));
+`,
+    );
+    chmodSync(join(directory, ".git/test-bin/gh"), 0o755);
     write("source.txt", "base source\n");
+    write("merged.txt", "fork=base\na\nb\nc\nupstream=base\n");
     write(".github/workflows/common.yml", "base workflow\n");
     write(".github/workflows/deleted.yml", "keep this workflow\n");
     git("add", ".");
@@ -121,6 +162,7 @@ function withRepository(body) {
     const base = git("rev-parse", "HEAD");
     git("checkout", "-b", "fork/nightly");
     write("fork.txt", "fork customization\n");
+    write("merged.txt", "fork=custom\na\nb\nc\nupstream=base\n");
     write(".github/workflows/common.yml", "fork workflow\n");
     write(".github/workflows/fork.yml", "fork automation\n");
     git("add", ".");
@@ -128,6 +170,7 @@ function withRepository(body) {
     const fork = git("rev-parse", "HEAD");
     git("checkout", "-b", "upstream", base);
     write("source.txt", "upstream source\n");
+    write("merged.txt", "fork=base\na\nb\nc\nupstream=nightly\n");
     write(".github/workflows/common.yml", "upstream workflow\n");
     write(".github/workflows/added.yml", "upstream automation\n");
     git("rm", ".github/workflows/deleted.yml");
@@ -141,28 +184,78 @@ function withRepository(body) {
         env,
         encoding: "utf8",
       });
-    body({ directory, git, write, fork, upstream, run });
+    const output = () =>
+      Object.fromEntries(
+        readFileSync(env.GITHUB_OUTPUT, "utf8")
+          .trim()
+          .split("\n")
+          .map((line) => line.split("=")),
+      );
+    body({ directory, git, write, fork, upstream, run, env, output });
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
 }
 
 test("merges source and fork customizations while preserving every fork workflow", () => {
-  withRepository(({ directory, git, fork, upstream, run }) => {
+  withRepository(({ directory, git, fork, upstream, run, env, output }) => {
     const result = run();
     assert.equal(result.status, 0, result.stderr);
-    assert.equal(readFileSync(join(directory, "source.txt"), "utf8"), "upstream source\n");
-    assert.equal(readFileSync(join(directory, "fork.txt"), "utf8"), "fork customization\n");
+    const { sha: synced, base, changed } = output();
+    assert.equal(base, fork);
+    assert.equal(changed, "true");
+    assert.equal(git("rev-parse", "HEAD"), fork);
+    assert.equal(git("status", "--porcelain"), "");
+    assert.equal(git("show", `${synced}:source.txt`), "upstream source");
+    assert.equal(git("show", `${synced}:fork.txt`), "fork customization");
+    assert.equal(git("show", `${synced}:merged.txt`), "fork=custom\na\nb\nc\nupstream=nightly");
     assert.equal(
-      git("rev-parse", "HEAD:.github/workflows"),
+      git("rev-parse", `${synced}:.github/workflows`),
       git("rev-parse", `${fork}:.github/workflows`),
     );
     assert.equal(existsSync(join(directory, ".github/workflows/added.yml")), false);
-    assert.equal(git("rev-parse", "HEAD^2"), upstream);
-    const synced = git("rev-parse", "HEAD");
+    assert.equal(git("rev-parse", `${synced}^1`), fork);
+    assert.equal(git("rev-parse", `${synced}^2`), upstream);
+    git("reset", "--hard", synced);
     assert.equal(run().status, 0);
     assert.equal(git("rev-parse", "HEAD"), synced);
+    assert.equal(output().changed, "false");
+    const refs = git("for-each-ref", "--format=%(refname):%(objectname)");
+    env.VERIFY_SYNC_SIGNING = "true";
+    const proof = run();
+    assert.equal(proof.status, 0, proof.stderr);
+    const proofSha = /Verified GitHub bot signing with unreferenced commit ([0-9a-f]{40})/.exec(
+      proof.stdout,
+    )?.[1];
+    assert.ok(proofSha, proof.stdout);
+    assert.equal(git("rev-parse", `${proofSha}^{tree}`), git("rev-parse", `${synced}^{tree}`));
+    assert.equal(git("rev-parse", `${proofSha}^1`), synced);
+    assert.equal(git("rev-parse", `${proofSha}^2`), upstream);
+    assert.equal(git("for-each-ref", "--format=%(refname):%(objectname)"), refs);
+    assert.equal(git("status", "--porcelain"), "");
+    assert.equal(output().changed, "false");
+    rmSync(env.GITHUB_OUTPUT);
+    env.TEST_VERIFICATION = "false";
+    const rejected = run();
+    assert.notEqual(rejected.status, 0);
+    assert.match(rejected.stderr, /verified/);
+    assert.equal(git("for-each-ref", "--format=%(refname):%(objectname)"), refs);
+    assert.equal(existsSync(env.GITHUB_OUTPUT), false);
   });
+});
+
+test("refuses unverified commits or mismatched merge data before publication", () => {
+  for (const verification of ["false", "missing", "string", "wrong-parent", "wrong-tree"]) {
+    withRepository(({ git, fork, run, env }) => {
+      env.TEST_VERIFICATION = verification;
+      const result = run();
+      assert.notEqual(result.status, 0, verification);
+      assert.match(result.stderr, /verified|parents|tree/);
+      assert.equal(git("rev-parse", "HEAD"), fork);
+      assert.equal(git("status", "--porcelain"), "");
+      assert.equal(existsSync(env.GITHUB_OUTPUT), false);
+    });
+  }
 });
 
 test("aborts source conflicts without publishing a partial merge", () => {
