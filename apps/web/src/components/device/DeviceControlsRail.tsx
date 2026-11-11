@@ -15,10 +15,10 @@ import {
   Square,
   Type,
   X,
+  MoonIcon,
+  SunIcon,
 } from "lucide-react";
-import { Moon, Sun } from "lucide";
 import { Button } from "~/components/ui/button";
-import { MorphIcon } from "~/components/MorphIcon";
 import {
   Menu,
   MenuItem,
@@ -134,7 +134,7 @@ export function DeviceControlsRail(props: {
             disabled={controls.disabled || !settings?.appearance}
             onClick={() => void controls.act({ type: "setAppearance", value: nextAppearance })}
           >
-            <MorphIcon icon={settings?.appearance === "dark" ? Sun : Moon} />
+            {settings?.appearance === "dark" ? <SunIcon /> : <MoonIcon />}
           </RailButton>
           <Menu>
             <MenuTrigger
