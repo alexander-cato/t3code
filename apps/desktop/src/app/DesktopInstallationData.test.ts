@@ -58,8 +58,10 @@ const fixture = Effect.gen(function* () {
     CREATE TABLE scheduled_tasks (enabled INTEGER, next_run_at TEXT);
     INSERT INTO scheduled_tasks VALUES (1, '2026-12-01');
     CREATE TABLE orchestration_v2_effect_outbox (status TEXT);
-    CREATE TABLE orchestration_v2_projection_runs (status TEXT);
-    CREATE TABLE orchestration_v2_projection_threads (payload_json TEXT);
+    CREATE TABLE orchestration_v2_projection_runs (
+      status TEXT, run_id TEXT, thread_id TEXT, completed_at TEXT, ordinal INTEGER, payload_json TEXT
+    );
+    CREATE TABLE orchestration_v2_projection_threads (payload_json TEXT, thread_id TEXT DEFAULT 'thread');
     CREATE TABLE orchestration_v2_projection_provider_threads (status TEXT, payload_json TEXT);
     CREATE TABLE orchestration_v2_projection_provider_sessions (status TEXT, payload_json TEXT);
     CREATE TABLE orchestration_v2_projection_runtime_requests (status TEXT);
@@ -97,6 +99,25 @@ it.effect(
       const f = yield* fixture;
       const state = yield* f.data.getState;
       assert.equal(state.installations[0]?.directory, f.path.join(f.home, ".t3"));
+      const profile = f.path.join("providers", "antigravity", "profile");
+      for (const directory of ["config", "antigravity-cli"]) {
+        const native = f.path.join(f.home, ".gemini", directory, "skills");
+        const managed = f.path.join(f.source, profile, directory, "skills");
+        yield* f.fs.makeDirectory(native, { recursive: true });
+        yield* f.fs.writeFileString(f.path.join(native, "SKILL.md"), "native skill");
+        yield* f.fs.makeDirectory(f.path.dirname(managed), { recursive: true });
+        yield* f.fs.symlink(native, managed);
+      }
+      const ownedSkill = f.path.join("providers", "antigravity", "owned", "config", "skills");
+      yield* f.fs.makeDirectory(f.path.join(f.source, ownedSkill), { recursive: true });
+      yield* f.fs.writeFileString(f.path.join(f.source, ownedSkill, "SKILL.md"), "owned skill");
+      f.database.exec(`
+        INSERT INTO orchestration_v2_projection_runs VALUES
+          ('failed', 'old-run', 'history', '2026-11-01T00:00:00Z', 1, '{}'),
+          ('completed', 'new-run', 'history', '2026-11-02T00:00:00Z', 2, '{}');
+        INSERT INTO orchestration_v2_projection_threads VALUES
+          ('{"limitRecovery":{"autoResume":true,"runId":"old-run"}}', 'history');
+      `);
       yield* f.data.prepare(f.source);
       assert.equal(
         yield* f.fs.readFileString(f.path.join(f.target, "previous.txt")),
@@ -151,6 +172,19 @@ it.effect(
         '{"updateChannel":"nightly"}',
       );
       assert.isFalse(yield* f.fs.exists(f.path.join(f.target, "server-owner.sqlite")));
+      for (const directory of ["config", "antigravity-cli"]) {
+        assert.isFalse(yield* f.fs.exists(f.path.join(f.target, profile, directory, "skills")));
+        assert.equal(
+          yield* f.fs.readFileString(
+            f.path.join(f.home, ".gemini", directory, "skills", "SKILL.md"),
+          ),
+          "native skill",
+        );
+      }
+      assert.equal(
+        yield* f.fs.readFileString(f.path.join(f.target, ownedSkill, "SKILL.md")),
+        "owned skill",
+      );
       const imported = yield* f.data.getState;
       assert.lengthOf(imported.backups, 1);
       yield* f.data.restore(imported.backups[0]!.id);
@@ -187,9 +221,14 @@ it.effect(
       else assert.fail("Import should reject pending agent effects");
       assert.isFalse(yield* f.fs.exists(f.path.join(f.base, "pending-installation-import.json")));
       f.database.exec("DELETE FROM orchestration_v2_effect_outbox");
+      f.database.exec(`INSERT INTO orchestration_v2_projection_runs VALUES
+        ('failed', 'latest-run', 'thread', '2026-11-01T00:00:00Z', 1, '{}')`);
       for (const [table, values] of [
-        ["orchestration_v2_projection_threads", ['{"limitRecovery":{"autoResume":true}}']],
-        ["orchestration_v2_projection_threads", ['{"pullRequests":[{"watch":{}}]}']],
+        [
+          "orchestration_v2_projection_threads",
+          ['{"limitRecovery":{"autoResume":true,"runId":"latest-run"}}', "thread"],
+        ],
+        ["orchestration_v2_projection_threads", ['{"pullRequests":[{"watch":{}}]}', "thread"]],
         ["orchestration_v2_projection_provider_threads", ["active", "{}"]],
         [
           "orchestration_v2_projection_provider_threads",

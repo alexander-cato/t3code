@@ -177,7 +177,21 @@ const snapshotDatabase = Effect.fn("desktop.installationData.snapshotDatabase")(
           ],
           [
             "orchestration_v2_projection_threads",
-            "json_valid(payload_json) AND (json_extract(payload_json, '$.limitRecovery.autoResume') = 1 OR EXISTS (SELECT 1 FROM json_each(payload_json, '$.pullRequests') AS link WHERE json_type(link.value, '$.watch') = 'object'))",
+            `json_valid(payload_json) AND (
+              EXISTS (SELECT 1 FROM json_each(payload_json, '$.pullRequests') AS link
+                WHERE json_type(link.value, '$.watch') = 'object')
+              OR (json_extract(payload_json, '$.limitRecovery.autoResume') = 1
+                AND json_extract(payload_json, '$.limitRecovery.runId') = (
+                  SELECT latest.run_id FROM orchestration_v2_projection_runs latest
+                  WHERE latest.thread_id = orchestration_v2_projection_threads.thread_id
+                    AND latest.status <> 'queued'
+                    AND NOT (latest.status = 'cancelled'
+                      AND json_extract(latest.payload_json, '$.startedAt') IS NULL)
+                  ORDER BY latest.completed_at IS NULL DESC, latest.completed_at DESC,
+                    latest.ordinal DESC, latest.run_id DESC
+                  LIMIT 1
+                ))
+            )`,
           ],
         ] as const) {
           if (
@@ -314,6 +328,20 @@ export const make = Effect.gen(function* () {
     root: string,
     ancestors: ReadonlySet<string> = new Set(),
   ): Effect.fn.Return<void, PlatformError.PlatformError | DesktopInstallationDataUnavailable> {
+    const relative = path.relative(root, source).split(path.sep);
+    // Antigravity recreates links to native skill directories when preparing its profile.
+    if (
+      relative.length === 5 &&
+      relative[0] === "providers" &&
+      relative[1] === "antigravity" &&
+      (relative[3] === "config" || relative[3] === "antigravity-cli") &&
+      relative[4] === "skills" &&
+      (yield* fs.readLink(source).pipe(
+        Effect.as(true),
+        Effect.orElseSucceed(() => false),
+      ))
+    )
+      return;
     const real = yield* fs.realPath(source);
     if ((real !== root && !real.startsWith(root + path.sep)) || ancestors.has(real))
       return yield* new DesktopInstallationDataUnavailable({ reason: "unsafe-path" });

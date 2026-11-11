@@ -19,17 +19,27 @@ export function InstallationDataSettings({
   useEffect(() => {
     if (!bridge?.getInstallationDataState) return;
     let disposed = false;
-    void bridge.getInstallationDataState().then(
-      (result) => {
-        if (!disposed) setState(result);
-      },
-      (cause) => {
-        if (!disposed)
-          setError(cause instanceof Error ? cause.message : "Could not inspect installations.");
-      },
-    );
+    let request = 0;
+    const refresh = () => {
+      request += 1;
+      const current = request;
+      void bridge.getInstallationDataState!().then(
+        (result) => {
+          if (disposed || current !== request) return;
+          setState(result);
+          setError(null);
+        },
+        (cause) => {
+          if (!disposed && current === request)
+            setError(cause instanceof Error ? cause.message : "Could not inspect installations.");
+        },
+      );
+    };
+    refresh();
+    window.addEventListener("focus", refresh);
     return () => {
       disposed = true;
+      window.removeEventListener("focus", refresh);
     };
   }, [bridge]);
   if (
