@@ -34,6 +34,7 @@ jobs:
     outputs:
       build: ${{ steps.resolve.outputs.build }}
       ref: ${{ steps.resolve.outputs.ref }}
+      previous_ref: ${{ steps.resolve.outputs.previous_ref }}
       version: ${{ steps.resolve.outputs.version }}
       tag: ${{ steps.resolve.outputs.tag }}
       signed: ${{ steps.signing.outputs.signed }}
@@ -95,14 +96,31 @@ jobs:
             const latest = releases
               .filter((release) => !release.draft && release.published_at && /^v\d+\.\d+\.\d+-nightly\.\d{8}\.\d+$/.test(release.tag_name))
               .sort((a, b) => Date.parse(b.published_at) - Date.parse(a.published_at))[0];
-            if (latest && process.env.FORCE_BUILD !== 'true') {
+            let previousRef = '';
+            if (latest) {
               const { data: previous } = await github.rest.repos.getCommit({ ...context.repo, ref: latest.tag_name });
-              if (previous.sha === ref) {
-                core.info('This fork commit already has a nightly release.');
-                core.setOutput('build', 'false');
-                return;
+              previousRef = previous.sha;
+              if (process.env.FORCE_BUILD !== 'true') {
+                if (previous.sha === ref) {
+                  core.info('This fork commit already has a nightly release.');
+                  core.setOutput('build', 'false');
+                  return;
+                }
+                const { data: changes } = await github.rest.repos.compareCommitsWithBasehead({
+                  ...context.repo, basehead: `${previous.sha}...${ref}`,
+                });
+                const automationPath = (path) => /^\.github\/(scripts|workflows)\//.test(path);
+                if (changes.status === 'ahead' && Array.isArray(changes.files) &&
+                    changes.files.length < 300 && changes.files.every((file) =>
+                      automationPath(file.filename) &&
+                      (!file.previous_filename || automationPath(file.previous_filename)))) {
+                  core.info('Only release automation changed; no application update is needed.');
+                  core.setOutput('build', 'false');
+                  return;
+                }
               }
             }
+            core.setOutput('previous_ref', previousRef);
             const readFile = async (path) => {
               const { data } = await github.rest.repos.getContent({ ...context.repo, path, ref });
               return Buffer.from(data.content, 'base64').toString('utf8');
@@ -226,12 +244,35 @@ jobs:
       VERSION: ${{ needs.resolve.outputs.version }}
       TAG: ${{ needs.resolve.outputs.tag }}
       REF: ${{ needs.resolve.outputs.ref }}
+      PREVIOUS_REF: ${{ needs.resolve.outputs.previous_ref }}
       SIGNED: ${{ needs.resolve.outputs.signed }}
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: desktop-mac-arm64
           path: assets
+      - name: Write user-facing release notes
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const fs = require('node:fs/promises');
+            const path = require('node:path');
+            // Run the generator from the trusted workflow revision, not the build ref.
+            const { data } = await github.rest.repos.getContent({
+              ...context.repo, ref: context.sha, path: '.github/scripts/fork-release-notes.cjs',
+            });
+            if (data.type !== 'file' || data.encoding !== 'base64' || typeof data.content !== 'string') {
+              throw new Error('The trusted release-note generator is unavailable.');
+            }
+            const generatorPath = path.join(process.env.RUNNER_TEMP, 'fork-release-notes.cjs');
+            await fs.writeFile(generatorPath, Buffer.from(data.content, 'base64'), { mode: 0o600, flag: 'wx' });
+            const { generateForkReleaseNotes } = require(generatorPath);
+            const notes = await generateForkReleaseNotes({
+              github, repository: context.repo, ref: process.env.REF,
+              previousRef: process.env.PREVIOUS_REF || undefined,
+            });
+            if (typeof notes !== 'string' || !notes.trim()) throw new Error('Release notes are empty.');
+            await fs.writeFile(path.join(process.env.RUNNER_TEMP, 'notes.md'), notes, { mode: 0o600 });
       - name: Publish fork installer
         run: |
           set -euo pipefail
@@ -247,7 +288,7 @@ jobs:
             test -s assets/nightly-mac.yml
             assets+=(assets/nightly-mac.yml)
           fi
-          printf '%s\n\n' "Fork source: https://github.com/$GITHUB_REPOSITORY/tree/$REF" > "$RUNNER_TEMP/notes.md"
+          test -s "$RUNNER_TEMP/notes.md"
           if [[ "$SIGNED" != true ]]; then
             printf '%s\n' 'Unsigned fork build for manual installation. Automatic app updates require signing credentials and a signed fork install.' >> "$RUNNER_TEMP/notes.md"
           fi

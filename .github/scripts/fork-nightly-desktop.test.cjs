@@ -1,5 +1,6 @@
 const assert = require("node:assert/strict");
-const { existsSync, readFileSync } = require("node:fs");
+const { existsSync, readFileSync, mkdtempSync, rmSync } = require("node:fs");
+const { tmpdir } = require("node:os");
 const { dirname, join } = require("node:path");
 const test = require("node:test");
 
@@ -40,6 +41,8 @@ function fixture({
   author = "alexander-cato",
   sourceSha = "fork-commit",
   provenance = null,
+  changedFiles = [{ filename: "apps/web/src/App.tsx" }],
+  comparisonStatus = "ahead",
 } = {}) {
   const outputs = new Map();
   const reads = [];
@@ -89,6 +92,9 @@ function fixture({
           }
           assert.equal(ref, nightly.tag_name);
           return { data: { sha: previousSha } };
+        },
+        async compareCommitsWithBasehead() {
+          return { data: { status: comparisonStatus, files: changedFiles } };
         },
         async getContent({ path, ref }) {
           assert.equal(ref, "fork-commit");
@@ -177,11 +183,30 @@ test("pins fork builds and public configuration to the fork branch commit", asyn
   }
 });
 
-test("does not rebuild a fork commit that already has a published nightly", async () => {
+test("does not offer an application update for unchanged code or release automation alone", async () => {
   const { run, outputs, reads } = fixture({ releases: [nightly], previousSha: "fork-commit" });
   await run();
   assert.equal(outputs.get("build"), "false");
   assert.deepEqual(reads, []);
+  const automation = [
+    { filename: ".github/workflows/fork-nightly-desktop.yml" },
+    { filename: ".github/scripts/fork-release-notes.cjs" },
+  ];
+  const unchanged = fixture({ releases: [nightly], changedFiles: automation });
+  await unchanged.run();
+  assert.equal(unchanged.outputs.get("build"), "false");
+  for (const options of [
+    { changedFiles: [...automation, { filename: "apps/web/src/App.tsx" }] },
+    { changedFiles: [{ ...automation[1], previous_filename: "apps/web/src/App.tsx" }] },
+    { changedFiles: automation, comparisonStatus: "diverged" },
+    { changedFiles: Array.from({ length: 300 }, () => automation[0]) },
+    { changedFiles: automation, force: true },
+  ]) {
+    const candidate = fixture({ releases: [nightly], ...options });
+    await candidate.run();
+    assert.equal(candidate.outputs.get("build"), "true");
+    assert.equal(candidate.outputs.get("previous_ref"), "previous");
+  }
 });
 
 test("manual force builds can publish a newly signed installer for the same fork commit", async () => {
@@ -201,6 +226,62 @@ test("draft installers do not suppress a published build", async () => {
   });
   await run();
   assert.equal(outputs.get("build"), "true");
+});
+
+test("loads the note generator from the trusted workflow revision rather than the build ref", async () => {
+  const code = workflow.match(
+    /name: Write user-facing release notes[\s\S]*?script: \|\n((?:            .*\n|\n)+)/,
+  )?.[1];
+  assert.ok(code);
+  const writeNotes = new AsyncFunction(
+    "github",
+    "context",
+    "process",
+    "require",
+    code.replace(/^            /gm, ""),
+  );
+  const directory = mkdtempSync(join(tmpdir(), "t3-fork-notes-"));
+  const ref = "c".repeat(40);
+  try {
+    await writeNotes(
+      {
+        rest: {
+          repos: {
+            async getContent({ ref, path }) {
+              assert.equal(ref, "trusted-workflow");
+              assert.equal(path, ".github/scripts/fork-release-notes.cjs");
+              return {
+                data: {
+                  type: "file",
+                  encoding: "base64",
+                  content: readFileSync(join(__dirname, "fork-release-notes.cjs")).toString(
+                    "base64",
+                  ),
+                },
+              };
+            },
+            async getCommit() {
+              return { data: { sha: ref } };
+            },
+          },
+        },
+        async paginate() {
+          return [];
+        },
+      },
+      {
+        repo: { owner: "alexander-cato", repo: "t3code" },
+        sha: "trusted-workflow",
+      },
+      { env: { RUNNER_TEMP: directory, REF: ref } },
+      require,
+    );
+    const notes = readFileSync(join(directory, "notes.md"), "utf8");
+    assert.match(notes, /^First fork release\./);
+    assert.match(notes, /<summary>Full changelog<\/summary>/);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("refuses feature-branch dispatches, untrusted commits, and invalid source versions", async () => {
