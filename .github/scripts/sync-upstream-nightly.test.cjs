@@ -47,6 +47,7 @@ function fixture({
   author = "alexander-cato",
   sourceSha = "fork-commit",
   provenance = null,
+  comparisonStatus = "diverged",
 } = {}) {
   const calls = [];
   const outputs = new Map();
@@ -79,6 +80,11 @@ function fixture({
     rest: {
       repos: {
         listReleases() {},
+        async compareCommitsWithBasehead(params) {
+          assert.equal(params.owner, "alexander-cato");
+          assert.equal(params.basehead, "nightly-commit...fork-commit");
+          return { data: { status: comparisonStatus } };
+        },
         async getBranch({ branch }) {
           assert.equal(branch, "fork/nightly");
           return { data: { commit: { sha: "fork-commit" } } };
@@ -145,6 +151,16 @@ test("resolves the newest published nightly tag to an immutable commit", async (
   assert.equal(outputs.get("sha"), "nightly-commit");
   assert.equal(outputs.get("tag"), nightly.tag_name);
   assert.equal(outputs.get("fork_ref"), "fork-commit");
+  assert.equal(outputs.get("needs_sync"), "true");
+  for (const comparisonStatus of ["ahead", "identical", "behind", "diverged"]) {
+    const candidate = fixture({ comparisonStatus });
+    await candidate.run();
+    assert.equal(
+      candidate.outputs.get("needs_sync"),
+      ["ahead", "identical"].includes(comparisonStatus) ? "false" : "true",
+    );
+  }
+  await assert.rejects(fixture({ comparisonStatus: "unknown" }).run(), /comparison/i);
   for (const identity of [
     {
       committer: "github-actions[bot]",
