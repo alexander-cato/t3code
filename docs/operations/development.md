@@ -192,6 +192,45 @@ startup and keeps its own SQLite data, signing key, and revocation state. Deskto
 servers ignore the value. See [environment authentication](../internals/environment-auth.md#reusable-dev-credential)
 for the security model.
 
+## Fork contribution workflow
+
+For `alexander-cato/t3code`, `fork/nightly` is the application integration branch. It contains our
+custom changes and the published upstream nightlies incorporated by the sync workflow. Installers
+are built from commits on this branch. `main` holds trusted release controls and an older application
+snapshot; it remains the default branch for the protected release workflow.
+
+Create custom changes on a feature branch and open a PR into `fork/nightly`. Use the `fork-work/`
+prefix and limit `origin` fetch refspecs to `main`, `fork/nightly`, and `fork-work/*` to keep inherited
+upstream branches out of the local branch picker. In a T3 worktree, explicitly select
+`origin/fork/nightly` as the starting branch. For an existing clean checkout:
+
+```sh
+git fetch --no-tags origin
+fork_work_branch=fork-work/my-change
+git switch --no-track -c "$fork_work_branch" origin/fork/nightly
+git config "branch.$fork_work_branch.t3-merge-base" origin/fork/nightly
+git config "branch.$fork_work_branch.t3-merge-base-ref" refs/remotes/origin/fork/nightly
+git config "branch.$fork_work_branch.gh-merge-base" fork/nightly
+```
+
+After implementing and checking the change, publish the feature branch under its own name:
+
+```sh
+vp run check:changed origin/fork/nightly
+git push --set-upstream origin HEAD
+gh pr create --repo alexander-cato/t3code --base fork/nightly --head "$fork_work_branch"
+```
+
+After review and required checks, merge the feature into the latest integration branch with
+`git merge --no-ff -S`, then push that owner-signed merge commit to `fork/nightly`. The current
+release policy accepts Verified owner commits; the GitHub merge button produces a `web-flow`
+commit that requires sync provenance and would be rejected. The signed local merge keeps the PR
+head in the integration branch's ancestry so GitHub records it as merged.
+
+Automatic upstream nightly syncs continue to update `fork/nightly` directly. Release-control changes
+use a separate PR based on and targeting `main`; do not merge the application branch into `main` or
+move signing credentials to feature branches.
+
 ## Fork nightly sync
 
 `alexander-cato/t3code` uses [Sync upstream nightly](../../.github/workflows/sync-upstream-nightly.yml)
