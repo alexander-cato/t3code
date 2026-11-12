@@ -2,7 +2,7 @@ name: Sync upstream nightly
 
 on:
   schedule:
-    - cron: "17,47 * * * *"
+    - cron: "2-59/5 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -92,11 +92,19 @@ jobs:
               ...upstream,
               ref: nightly.tag_name,
             });
+            const { data: comparison } = await github.rest.repos.compareCommitsWithBasehead({
+              ...context.repo, basehead: `${commit.sha}...${forkRef}`, per_page: 1,
+            });
+            if (!['ahead', 'identical', 'behind', 'diverged'].includes(comparison.status)) {
+              throw new Error('GitHub returned an invalid upstream ancestry comparison.');
+            }
+            core.setOutput('needs_sync', ['ahead', 'identical'].includes(comparison.status) ? 'false' : 'true');
             core.setOutput('fork_ref', forkRef);
             core.setOutput('sha', commit.sha);
             core.setOutput('tag', nightly.tag_name);
 
       - name: Checkout fork source and trusted sync script
+        if: steps.nightly.outputs.needs_sync == 'true' || github.event_name == 'workflow_dispatch'
         env:
           WORKFLOW_SHA: ${{ github.sha }}
           FORK_REF: ${{ steps.nightly.outputs.fork_ref }}
@@ -112,6 +120,7 @@ jobs:
 
       - id: merge
         name: Merge source while preserving fork workflows
+        if: steps.nightly.outputs.needs_sync == 'true' || github.event_name == 'workflow_dispatch'
         env:
           UPSTREAM_SHA: ${{ steps.nightly.outputs.sha }}
           NIGHTLY_TAG: ${{ steps.nightly.outputs.tag }}
