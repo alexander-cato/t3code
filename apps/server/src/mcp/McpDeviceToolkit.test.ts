@@ -347,6 +347,7 @@ it.effect("device_open reports a failed host's setup error instead of no devices
         Layer.provideMerge(McpToolAccessTestkit.liveThreadsLayer),
         Layer.provide(layerFailed),
         Layer.provide(layerProjectsMock),
+        Layer.provide(layerNoVirtualMachines),
         Layer.provide(
           ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-device-toolkit-test-" }),
         ),

@@ -195,8 +195,9 @@ for the security model.
 ## Fork nightly sync
 
 `alexander-cato/t3code` uses [Sync upstream nightly](../../.github/workflows/sync-upstream-nightly.yml)
-to merge the latest published `pingdotgg/t3code` nightly into `fork/nightly`. It checks every
-30 minutes and can also run manually from the default branch in GitHub Actions. It follows the
+to merge the latest published `pingdotgg/t3code` nightly into `fork/nightly`. It schedules checks every
+5 minutes and can also run manually from the default branch in GitHub Actions. GitHub can delay
+scheduled starts; building and Apple notarization add time before an installer is available. It follows the
 release tag's commit, so unpublished changes on upstream `main` are excluded. Merge custom app
 changes into `fork/nightly` to keep them in future installers.
 
