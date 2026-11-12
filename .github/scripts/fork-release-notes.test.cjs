@@ -123,7 +123,7 @@ test("uses only newly incorporated upstream nightlies and new fork-only commits"
   const notes = await generateForkReleaseNotes(options);
   assert.equal(
     summary(notes).trim(),
-    "- Remember the selected provider\n- **Upstream improvement.** Restore remote connections.",
+    "## Our changes\n\n- **Our fork:** Remember the selected provider\n\n## Upstream changes\n\n- **Upstream: Upstream improvement.** Restore remote connections.",
   );
   assert.doesNotMatch(
     notes,
@@ -147,7 +147,10 @@ test("does not repeat upstream highlights on a fork-only rebuild", async () => {
     },
   });
   const notes = await generateForkReleaseNotes(options);
-  assert.equal(summary(notes).trim(), "- Retain the selected environment");
+  assert.equal(
+    summary(notes).trim(),
+    "## Our changes\n\n- **Our fork:** Retain the selected environment",
+  );
   assert.match(notes, new RegExp(`/releases/tag/${tag(2)}`));
 });
 
@@ -191,7 +194,7 @@ test("paginates both commit ranges before intersecting their SHAs", async () => 
   });
   assert.equal(
     summary(await generateForkReleaseNotes(options)).trim(),
-    "- Load long threads faster",
+    "## Our changes\n\n- **Our fork:** Load long threads faster",
   );
   for (const basehead of [`${previous}...${current}`, `${upstream}...${current}`]) {
     assert.ok(
@@ -210,7 +213,9 @@ test("describes a first release using only the newest included upstream baseline
     delete options.previousRef;
     const notes = await generateForkReleaseNotes(options);
     assert.match(summary(notes), /First fork release\./);
-    assert.ok(summary(notes).includes(countSummary));
+    assert.ok(summary(notes).includes(countSummary.slice(2)));
+    assert.match(summary(notes), /## Upstream changes\n\n- \*\*Upstream:/);
+    assert.doesNotMatch(summary(notes), /## Our changes|Our fork:/);
     assert.doesNotMatch(notes, /Old highlight|compare\/0000000000000000000000000000000000000002/);
   }
 });
@@ -235,6 +240,8 @@ test("deduplicates and bounds highlights while leaving room for a new upstream h
   assert.equal((notes.match(/^- /gm) ?? []).length, 7);
   assert.equal((notes.match(/Repair action 9/g) ?? []).length, 1);
   assert.match(notes, /Upstream improvement/);
+  assert.equal((notes.match(/^- \*\*Our fork:/gm) ?? []).length, 6);
+  assert.equal((notes.match(/^- \*\*Upstream:/gm) ?? []).length, 1);
 });
 
 test("ignores invalid release entries and rejects incomplete API responses", async () => {
