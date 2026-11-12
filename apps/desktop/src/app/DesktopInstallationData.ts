@@ -169,7 +169,7 @@ const snapshotDatabase = Effect.fn("desktop.installationData.snapshotDatabase")(
           ["orchestration_v2_projection_runtime_requests", "status = 'pending'"],
           [
             "orchestration_v2_projection_provider_sessions",
-            "status NOT IN ('stopped', 'error') OR (json_valid(payload_json) AND json_array_length(payload_json, '$.extensionStatuses') > 0)",
+            "status NOT IN ('ready', 'stopped', 'error') OR (json_valid(payload_json) AND json_array_length(payload_json, '$.extensionStatuses') > 0)",
           ],
           [
             "orchestration_v2_projection_provider_threads",

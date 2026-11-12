@@ -117,6 +117,8 @@ it.effect(
           ('completed', 'new-run', 'history', '2026-11-02T00:00:00Z', 2, '{}');
         INSERT INTO orchestration_v2_projection_threads VALUES
           ('{"limitRecovery":{"autoResume":true,"runId":"old-run"}}', 'history');
+        INSERT INTO orchestration_v2_projection_provider_sessions VALUES
+          ('ready', '{}'), ('ready', '{"extensionStatuses":[]}');
       `);
       yield* f.data.prepare(f.source);
       assert.equal(
@@ -235,8 +237,15 @@ it.effect(
           ["idle", '{"pendingBackgroundTasks":[{}]}'],
         ],
         ["orchestration_v2_projection_provider_threads", ["idle", '{"goal":{"status":"active"}}']],
+        ["orchestration_v2_projection_provider_sessions", ["starting", "{}"]],
         ["orchestration_v2_projection_provider_sessions", ["running", "{}"]],
+        ["orchestration_v2_projection_provider_sessions", ["waiting", "{}"]],
+        [
+          "orchestration_v2_projection_provider_sessions",
+          ["ready", '{"extensionStatuses":[{"key":"watch","text":"Watching"}]}'],
+        ],
         ["orchestration_v2_projection_runtime_requests", ["pending"]],
+        ["orchestration_v2_projection_runs", ["running", "busy-run", "thread", null, 2, "{}"]],
       ] as const) {
         f.database
           .prepare(`INSERT INTO ${table} VALUES (${values.map(() => "?").join(",")})`)
