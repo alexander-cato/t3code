@@ -86,6 +86,17 @@ function uniqueHighlights(items) {
   });
 }
 
+function highlightSection(title, source, items) {
+  if (items.length === 0) return "";
+  // Installed updaters discard headings but preserve each item's leading bold label.
+  const bullets = items.map((text) =>
+    text.startsWith("**")
+      ? `- ${text.replace(/^\*\*/, `**${source}: `)}`
+      : `- **${source}:** ${text}`,
+  );
+  return `## ${title}\n\n${bullets.join("\n")}`;
+}
+
 async function generateForkReleaseNotes({
   github,
   repository,
@@ -211,14 +222,19 @@ async function generateForkReleaseNotes({
     incorporated.flatMap((release) => upstreamHighlights(release.body)),
   );
   const forkLimit = upstreamNotes.length > 0 ? MAX_HIGHLIGHTS - 1 : MAX_HIGHLIGHTS;
-  const highlights = uniqueHighlights([
-    ...forkHighlights.slice(0, forkLimit),
-    ...upstreamNotes,
-  ]).slice(0, MAX_HIGHLIGHTS);
+  const forkItems = forkHighlights.slice(0, forkLimit);
+  const upstreamItems = uniqueHighlights([...forkItems, ...upstreamNotes]).slice(
+    forkItems.length,
+    MAX_HIGHLIGHTS,
+  );
+  const sections = [
+    highlightSection("Our changes", "Our fork", forkItems),
+    highlightSection("Upstream changes", "Upstream", upstreamItems),
+  ].filter(Boolean);
   const introduction = previousSha ? "" : "First fork release.\n\n";
   const summary =
-    highlights.length > 0
-      ? highlights.map((text) => `- ${text}`).join("\n")
+    sections.length > 0
+      ? sections.join("\n\n")
       : previousSha
         ? "No user-facing changes were identified since the previous fork release."
         : "No user-facing highlights were identified for this build.";
