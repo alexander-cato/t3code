@@ -148,7 +148,9 @@ For mobile verification, a missing or outdated native client is an install step,
 
 ## Pull requests
 
-- Never make a PR unless the developer explicitly asks you to do so.
+- In `alexander-cato/t3code`, the owner's standing instruction is to publish custom changes as feature PRs into `fork/nightly`. Start from `origin/fork/nightly`, use `fork-work/<change>` branch names, and set the comparison base as described in [Fork contribution workflow](docs/operations/development.md#fork-contribution-workflow). Reviewed release-control changes target `main` separately; never merge application source into `main`.
+- Merge fork PRs only after review and required checks, using an owner-signed merge commit as described in that workflow. GitHub-generated commits require separate sync provenance under the current release policy.
+- Outside this fork, never make a PR unless the developer explicitly asks you to do so.
 - If `origin` is git.cafe, follow [GitCafe mirror](docs/operations/development.md#gitcafe-mirror-optional): push to `origin`, open and track PRs with `cafe` and their git.cafe URLs, and keep `gh` for merging.
 - Conventional commit titles, plain language: `fix(web): new threads no longer spike CPU`.
 - Body: the problem in a sentence or two, then how you fixed it. End with the model and harness that did the work.
