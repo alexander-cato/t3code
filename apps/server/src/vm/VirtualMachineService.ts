@@ -11,9 +11,10 @@ import {
   type VirtualMachineViewer,
   type VirtualMachineUploadInput,
 } from "@t3tools/contracts";
+import * as NodeUtil from "node:util";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { writeFileStringAtomically } from "@t3tools/shared/atomicWrite";
-import { isCommandAvailable } from "@t3tools/shared/shell";
+import { isCommandAvailable, resolveCommandPath } from "@t3tools/shared/shell";
 import * as Clock from "effect/Clock";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
@@ -74,11 +75,45 @@ const McpConnection = Schema.Struct({
 });
 const isVirtualMachineError = Schema.is(VirtualMachineError);
 const isMcpError = Schema.is(McpSchema.McpError);
+const isProcessTimeoutError = Schema.is(ProcessRunner.ProcessTimeoutError);
+const isProcessSpawnError = Schema.is(ProcessRunner.ProcessSpawnError);
+const isProcessOutputLimitError = Schema.is(ProcessRunner.ProcessOutputLimitError);
 const isEndedSession = Schema.is(Schema.Struct({ code: Schema.Literal("session_ended") }));
 const isRevivedSession = Schema.is(Schema.Struct({ revived: Schema.Literal(true) }));
 const GuestRpcs = RpcGroup.make(McpSchema.Initialize, McpSchema.CallTool, McpSchema.ListTools);
 const Configuration = Schema.Struct({ enabled: Schema.Boolean });
 const encodeConfiguration = Schema.encodeEffect(Schema.fromJsonString(Configuration));
+
+const commandFailure = (output: string): NonNullable<VirtualMachineError["failure"]> => {
+  const text = NodeUtil.stripVTControlCharacters(output.slice(-64_000));
+  if (/cua-netgw.{0,150}(?:not available|not found|missing)/i.test(text)) return "network-gateway";
+  if (
+    /no space left on device|not enough (?:free )?(?:disk |storage )?space|insufficient (?:disk |free )?space|ENOSPC/i.test(
+      text,
+    )
+  )
+    return "disk-space";
+  if (
+    /maximum number of (?:supported )?virtual machines|(?:running|concurrent) vm limit|virtual machine limit/i.test(
+      text,
+    )
+  )
+    return "vm-limit";
+  if (
+    /failed to (?:download|pull)|(?:download|pull).{0,100}(?:failed|timed out)|(?:ghcr\.io|registry).{0,120}(?:unauthorized|forbidden|connection|failed)/i.test(
+      text,
+    )
+  )
+    return "image-download";
+  if (
+    /failed to (?:connect|contact).{0,80}(?:lume|daemon|local service)|(?:lume|daemon).{0,100}(?:connection refused|not running|not reachable|unavailable)/i.test(
+      text,
+    )
+  )
+    return "local-service";
+  if (/permission denied|operation not permitted|EACCES/i.test(text)) return "permission";
+  return "command-exit";
+};
 
 // This image includes the guest service, desktop automation and development tools.
 // A vanilla Lume install has SSH/VNC but cannot serve the embedded desktop viewer.
@@ -233,6 +268,69 @@ const make = Effect.gen(function* () {
     return next;
   });
 
+  const childEnvironment = Effect.fn("VirtualMachineService.childEnvironment")(
+    function* () {
+      if (environment.CUA_NETGW !== undefined) return undefined;
+      const executable = yield* resolveCommandPath("cua", { env: environment });
+      if (!executable) return undefined;
+      // Cua's macOS sibling lookup retains launcher symlinks, hiding the bundled gateway.
+      const real = yield* fs.realPath(executable).pipe(Effect.orElseSucceed(() => null));
+      if (!real) return undefined;
+      const gateway = path.join(path.dirname(real), "cua-netgw");
+      if (!(yield* isCommandAvailable(gateway, { env: environment }))) return undefined;
+      return { ...environment, CUA_NETGW: gateway };
+    },
+    Effect.provideService(FileSystem.FileSystem, fs),
+    Effect.provideService(Path.Path, path),
+  );
+  const failCommand = Effect.fn("VirtualMachineService.failCommand")(function* (
+    operation: string,
+    args: ReadonlyArray<string>,
+    cause: ProcessRunner.ProcessRunError | ProcessRunner.ProcessRunOutput,
+  ) {
+    const result = "stdout" in cause ? cause : undefined;
+    const failure = result
+      ? result.timedOut
+        ? "timeout"
+        : commandFailure(`${result.stderr.slice(-32_000)}\n${result.stdout.slice(-32_000)}`)
+      : isProcessTimeoutError(cause)
+        ? "timeout"
+        : isProcessSpawnError(cause)
+          ? "spawn"
+          : isProcessOutputLimitError(cause)
+            ? "output-limit"
+            : "read";
+    const command =
+      args[0] === "sandbox" &&
+      [
+        "create",
+        "ls",
+        "resume",
+        "suspend",
+        "rm",
+        "view",
+        "mcp",
+        "exec",
+        "cp",
+        "screenshot",
+      ].includes(args[1] ?? "")
+        ? `cua sandbox ${args[1]}`
+        : "cua";
+    const diagnosticId = `vm-${(yield* random.uuidV4().pipe(Effect.orDie)).replaceAll("-", "").slice(0, 12)}`;
+    const details = {
+      operation,
+      reason: "command-failed" as const,
+      command,
+      failure,
+      exitCode: result?.code ?? undefined,
+      diagnosticId,
+    };
+    yield* Effect.logWarning(
+      "Virtual machine command failed",
+      new VirtualMachineError({ ...details, cause }),
+    );
+    return yield* new VirtualMachineError(details);
+  });
   const run = Effect.fn("VirtualMachineService.run")(function* (
     operation: string,
     args: ReadonlyArray<string>,
@@ -245,16 +343,13 @@ const make = Effect.gen(function* () {
       .run({
         command: "cua",
         args: ["--embedded", "--state-dir", stateDir, "--json", ...args],
+        env: yield* childEnvironment(),
         timeout: options?.timeout ?? "60 seconds",
         maxOutputBytes: 8 * 1024 * 1024,
       })
-      .pipe(
-        Effect.mapError(
-          (cause) => new VirtualMachineError({ operation, reason: "command-failed", cause }),
-        ),
-      );
+      .pipe(Effect.catch((cause) => failCommand(operation, args, cause)));
     if (result.code !== 0 && !options?.allowFailure) {
-      return yield* new VirtualMachineError({ operation, reason: "command-failed", cause: result });
+      return yield* failCommand(operation, args, result);
     }
     if (["create", "start", "stop", "delete"].includes(operation)) inventoryRevision++;
     return result;

@@ -112,6 +112,24 @@ export class VirtualMachineError extends Schema.TaggedError<VirtualMachineError>
       "invalid-response",
       "storage",
     ]),
+    command: Schema.optional(Schema.String.check(Schema.isMaxLength(64))),
+    exitCode: Schema.optional(Schema.Int),
+    failure: Schema.optional(
+      Schema.Literals([
+        "network-gateway",
+        "disk-space",
+        "vm-limit",
+        "image-download",
+        "local-service",
+        "permission",
+        "timeout",
+        "spawn",
+        "output-limit",
+        "read",
+        "command-exit",
+      ]),
+    ),
+    diagnosticId: Schema.optional(Schema.String.check(Schema.isMaxLength(32))),
     cause: Schema.optional(Schema.Defect()),
   },
 ) {
@@ -132,8 +150,41 @@ export class VirtualMachineError extends Schema.TaggedError<VirtualMachineError>
       case "command-failed":
         if (this.operation === "desktop-startup")
           return "The macOS desktop is still starting. Open the VM again to reconnect.";
+        if (this.command) {
+          const explanations = {
+            "network-gateway":
+              "Cua could not locate its cua-netgw network gateway. Set CUA_NETGW to the matching helper on the VM host, or repair the Cua installation, then retry.",
+            "disk-space":
+              "Cua reported insufficient disk space. Free storage on the VM host, then retry.",
+            "vm-limit":
+              "macOS reported its running VM limit was reached. Suspend another VM on this host, then retry.",
+            "image-download":
+              "The macOS image could not be downloaded. Check the VM host's network connection and image registry access, then retry.",
+            "local-service":
+              "Cua could not reach its local VM service. Check the Cua and Lume services on the VM host, then retry.",
+            permission:
+              "The VM host denied access. Check Cua's permissions on that host, then retry.",
+            timeout: "Cua exceeded the command's time limit. Check the VM host before retrying.",
+            spawn:
+              "The VM host could not launch Cua. Check its installation and executable permissions.",
+            "output-limit": "Cua's response exceeded the command output limit.",
+            read: "The VM host could not read Cua's response.",
+            "command-exit": "Cua reported a command failure.",
+          };
+          const summary =
+            this.operation === "create" ? "macOS setup failed" : "Virtual machine operation failed";
+          const exit = this.exitCode === undefined ? "" : ` (exit ${this.exitCode})`;
+          const explanation =
+            this.failure === undefined
+              ? "Cua reported a command failure."
+              : explanations[this.failure];
+          const reference = this.diagnosticId
+            ? ` Open Diagnostics on the VM host and search its logs for Diagnostic ID: ${this.diagnosticId}.`
+            : " Check the VM host's diagnostics and logs for the command output.";
+          return `${summary}: ${this.command}${exit}. ${explanation}${reference}`;
+        }
         if (this.operation === "create")
-          return "macOS could not be prepared. Check free disk space and other running macOS VMs, then retry.";
+          return "The macOS setup command failed. Check the VM host's diagnostics and logs.";
         return `The virtual machine ${this.operation} command failed. Check the environment server logs.`;
       case "invalid-response":
         return "Cua returned an unsupported response. Update Cua and try again.";

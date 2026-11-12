@@ -1,7 +1,7 @@
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
-import { ThreadId, type OrchestrationV2ThreadShell } from "@t3tools/contracts";
+import { ThreadId, VirtualMachineError, type OrchestrationV2ThreadShell } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Deferred from "effect/Deferred";
 import * as Context from "effect/Context";
@@ -26,6 +26,8 @@ import * as ProjectService from "../project/ProjectService.ts";
 import * as VirtualMachineService from "./VirtualMachineService.ts";
 
 const json = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
+const encodeVmError = Schema.encodeSync(VirtualMachineError);
+const decodeVmError = Schema.decodeUnknownSync(VirtualMachineError);
 const threadId = ThreadId.make("vm-test-thread");
 const otherThread = ThreadId.make("other-thread");
 const output = (stdout: string, code = 0): ProcessRunner.ProcessRunOutput => ({
@@ -43,8 +45,12 @@ const fixture = Effect.fn("vm.fixture")(function* (options?: {
   readonly enabled?: boolean;
   readonly machines?: ReadonlyArray<string>;
   readonly status?: string;
-  readonly resume?: ProcessRunner.ProcessRunOutput;
+  readonly resume?:
+    | ProcessRunner.ProcessRunOutput
+    | Effect.Effect<ProcessRunner.ProcessRunOutput, ProcessRunner.ProcessRunError>;
   readonly platform?: NodeJS.Platform;
+  readonly gateway?: "bundled" | "non-executable";
+  readonly environment?: NodeJS.ProcessEnv;
   readonly create?: Effect.Effect<ProcessRunner.ProcessRunOutput, ProcessRunner.ProcessRunError>;
   readonly power?: ProcessRunner.ProcessRunOutput;
   readonly exec?: Effect.Effect<ProcessRunner.ProcessRunOutput>;
@@ -130,6 +136,15 @@ const fixture = Effect.fn("vm.fixture")(function* (options?: {
     yield* fs.writeFileString(file, "#!/bin/sh\nexit 0\n");
     yield* fs.chmod(file, 0o755);
   }
+  const gateway = path.join(root, "Cua.app", "Contents", "MacOS", "cua-netgw");
+  if (options?.gateway) {
+    yield* fs.makeDirectory(path.dirname(gateway), { recursive: true });
+    const executable = path.join(path.dirname(gateway), "cua");
+    yield* fs.rename(path.join(bin, "cua"), executable);
+    yield* fs.symlink(executable, path.join(bin, "cua"));
+    yield* fs.writeFileString(gateway, "#!/bin/sh\nexit 0\n");
+    yield* fs.chmod(gateway, options.gateway === "bundled" ? 0o755 : 0o600);
+  }
   const settings = path.join(root, "userdata", "virtual-machines", "settings.json");
   yield* fs.makeDirectory(path.dirname(settings), { recursive: true });
   yield* fs.writeFileString(settings, json({ enabled: options?.enabled ?? true }));
@@ -186,7 +201,8 @@ const fixture = Effect.fn("vm.fixture")(function* (options?: {
             }),
           );
         case "resume":
-          if (options?.resume) return options.resume;
+          if (options?.resume)
+            return Effect.isEffect(options.resume) ? yield* options.resume : options.resume;
           status = "ready";
           return output("{}");
         case "rm":
@@ -212,11 +228,11 @@ const fixture = Effect.fn("vm.fixture")(function* (options?: {
       Layer.provide(Layer.succeed(ProcessRunner.ProcessRunner, runner)),
       Layer.provide(Layer.succeed(HostProcess.Platform, options?.platform ?? "darwin")),
       Layer.provide(Layer.succeed(HostProcess.Architecture, "arm64")),
-      Layer.provide(Layer.succeed(HostProcess.Environment, { PATH: bin })),
+      Layer.provide(Layer.succeed(HostProcess.Environment, { PATH: bin, ...options?.environment })),
     ),
   );
   const vms = Context.get(services, VirtualMachineService.VirtualMachineService);
-  return { vms, calls, root, fs, path, requests };
+  return { vms, calls, root, fs, path, requests, gateway };
 });
 
 const provide = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
@@ -236,6 +252,28 @@ it.effect("requires explicit enablement and leaves unsupported hosts idle", () =
       expect(linux.calls).toEqual([]);
     }),
   ),
+);
+
+it.effect.each([
+  { gateway: "bundled", environment: {}, expected: true },
+  { gateway: "bundled", environment: { CUA_NETGW: "/custom/cua-netgw" }, expected: false },
+  { gateway: "non-executable", environment: {}, expected: false },
+  { environment: {}, expected: false },
+] as const)(
+  "resolves only an executable bundled gateway while preserving explicit CUA_NETGW: %j",
+  (input) =>
+    provide(
+      Effect.gen(function* () {
+        const { vms, calls, fs, gateway } = yield* fixture(input);
+        yield* vms.list;
+        if (input.expected) {
+          expect(calls[0]?.env?.CUA_NETGW).toBe(yield* fs.realPath(gateway));
+          expect(calls[0]?.env?.PATH).toBeDefined();
+        } else {
+          expect(calls[0]?.env).toBeUndefined();
+        }
+      }),
+    ),
 );
 
 it.effect("lists only local Lume VMs and isolates Cua from the user's global state", () =>
@@ -305,14 +343,97 @@ it.effect.each(["ready", "running"])(
     ),
 );
 
-it.effect("does not publish a viewer when resuming a supposedly ready guest fails", () =>
+it.effect.each([
+  ["unknown", "Start failed", "command-exit", "Cua reported a command failure"],
+  ["gateway", "cua-netgw is not available", "network-gateway", "could not locate its cua-netgw"],
+  ["disk", "No space left on device", "disk-space", "insufficient disk space"],
+  [
+    "limit",
+    "The maximum number of supported virtual machines has been reached",
+    "vm-limit",
+    "running VM limit",
+  ],
+  [
+    "download",
+    "failed to pull macOS image: registry connection failed",
+    "image-download",
+    "image could not be downloaded",
+  ],
+  [
+    "service",
+    "Lume daemon connection refused",
+    "local-service",
+    "could not reach its local VM service",
+  ],
+  ["permission", "Operation not permitted", "permission", "host denied access"],
+])(
+  "keeps a failed resume private and identifies its %s failure",
+  ([_label, stderr, failure, explanation]) =>
+    provide(
+      Effect.gen(function* () {
+        const privateOutput =
+          "/Users/example/private Bearer guest-secret https://guest.test/?ticket=private-ticket";
+        const { vms, calls } = yield* fixture({
+          status: "ready",
+          resume: { ...output(privateOutput, 17), stderr: `${stderr}\n${privateOutput}` },
+        });
+        const error = yield* vms.open({ name: "native-tile", threadId }).pipe(Effect.flip);
+        expect(error.operation).toBe("start");
+        expect(error.failure).toBe(failure);
+        expect(error.message).toContain(explanation);
+        expect(error.message).toContain("cua sandbox resume (exit 17)");
+        expect(error.diagnosticId).toMatch(/^vm-[a-f0-9]{12}$/);
+        const encoded = encodeVmError(error);
+        const decoded = decodeVmError(encoded);
+        expect(decoded.message).toBe(error.message);
+        expect(decoded.command).toBe("cua sandbox resume");
+        expect(decoded.exitCode).toBe(17);
+        expect(decoded.diagnosticId).toBe(error.diagnosticId);
+        for (const privateText of [
+          "/Users/example",
+          "guest-secret",
+          "guest.test",
+          "private-ticket",
+        ])
+          expect(json(encoded)).not.toContain(privateText);
+        expect(calls.some((call) => call.args.includes("view"))).toBe(false);
+        expect((yield* vms.state).sessions).toEqual([]);
+      }),
+    ),
+);
+
+it.effect.each([
+  [
+    "timeout",
+    new ProcessRunner.ProcessTimeoutError({ command: "cua", argumentCount: 3, timeoutMs: 300_000 }),
+  ],
+  [
+    "spawn",
+    new ProcessRunner.ProcessSpawnError({
+      command: "cua",
+      argumentCount: 3,
+      cause: new Error("private-spawn-details"),
+    }),
+  ],
+  [
+    "output-limit",
+    new ProcessRunner.ProcessOutputLimitError({
+      command: "cua",
+      argumentCount: 3,
+      stream: "stderr",
+      maxBytes: 8_000_000,
+      observedBytes: 8_000_001,
+    }),
+  ],
+] as const)("distinguishes a %s failure before Cua returns an exit status", ([failure, cause]) =>
   provide(
     Effect.gen(function* () {
-      const { vms, calls } = yield* fixture({ status: "ready", resume: output("Start failed", 1) });
+      const { vms } = yield* fixture({ resume: Effect.fail(cause) });
       const error = yield* vms.open({ name: "native-tile", threadId }).pipe(Effect.flip);
-      expect(error.operation).toBe("start");
-      expect(calls.some((call) => call.args.includes("view"))).toBe(false);
-      expect((yield* vms.state).sessions).toEqual([]);
+      expect(error.failure).toBe(failure);
+      expect(error.command).toBe("cua sandbox resume");
+      expect(error.exitCode).toBeUndefined();
+      expect(json(encodeVmError(error))).not.toContain("private-spawn-details");
     }),
   ),
 );
@@ -659,7 +780,13 @@ it.effect("records a failed background creation so it can be retried", () =>
       yield* vms.create({ name: "new-vm", cpu: 4, memoryGb: 8 });
       yield* Deferred.await(started);
       const subscription = yield* vms.subscribe;
-      yield* Deferred.succeed(finish, output("", 1));
+      yield* Deferred.succeed(finish, {
+        ...output("", 1),
+        stderr:
+          "\u001b[33mWARN\u001b[0m lume serve is older than cua needs\n" +
+          "cua: local runtime: [local] cua-netgw is not available: set CUA_NETGW to its path\n" +
+          "Private context: /Users/example/private Bearer guest-secret http://localhost:3211/?ticket=private-ticket",
+      });
       const failed = yield* Stream.fromSubscription(subscription).pipe(
         Stream.filter((state) =>
           state.operations.some((operation) => operation.status === "failed"),
@@ -670,6 +797,14 @@ it.effect("records a failed background creation so it can be retried", () =>
         name: "new-vm",
         status: "failed",
       });
+      const message = Option.getOrThrow(failed).operations[0]?.error;
+      expect(message).toContain("cua sandbox create");
+      expect(message).toContain("exit 1");
+      expect(message).toContain("cua-netgw");
+      expect(message).toContain("CUA_NETGW");
+      expect(message).toContain("Diagnostic ID:");
+      for (const privateText of ["/Users/example", "guest-secret", "localhost", "private-ticket"])
+        expect(message).not.toContain(privateText);
       const callsBeforeDismiss = calls.length;
       yield* vms.dismiss("new-vm");
       expect((yield* vms.state).operations).toEqual([]);
