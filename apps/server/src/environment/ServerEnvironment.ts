@@ -292,6 +292,8 @@ export const make = Effect.gen(function* () {
       virtualMachines: hostPlatform === "darwin" && hostArchitecture === "arm64",
       mcpApprovalCodes: true,
       mcpHostedApproval: true,
+      shellThreadFamilies: true,
+      shellOlderSettled: true,
     },
   };
 
