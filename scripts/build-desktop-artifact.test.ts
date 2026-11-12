@@ -1458,7 +1458,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
   it.effect("requires the expected notarized signature for signed macOS payloads", () =>
     Effect.scoped(
       Effect.gen(function* () {
-        const fixture = yield* makeMacPayloadFixture({});
+        const fixture = yield* makePackagedAppFixture({});
         for (const failure of [
           undefined,
           "codesign",

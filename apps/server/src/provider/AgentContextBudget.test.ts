@@ -135,24 +135,26 @@ it.effect("only request_secret asks Claude Code to load it up front", () =>
 it.effect("agent context matches the committed budget", () =>
   Effect.gen(function* () {
     const mcp = yield* McpServer.McpServer;
+    const tools = mcp.tools.map(({ tool }) => ({
+      name: tool.name,
+      description: tool.description,
+      inputSchema: tool.inputSchema,
+    }));
     const measured = {
       claudeSystemAppendBytes: utf8Bytes(claudeSystemAppend()),
       codexAdditionalContextBytes: utf8Bytes(codexAdditionalContext()),
-      // The model sees these fields. outputSchema and annotations are protocol metadata.
-      mcpToolListJsonBytes: utf8Bytes(
-        JSON.stringify(
-          mcp.tools.map(({ tool }) => ({
-            name: tool.name,
-            description: tool.description,
-            inputSchema: tool.inputSchema,
-          })),
-        ),
-      ),
+      mcpToolListJsonBytes: utf8Bytes(JSON.stringify(tools)),
+    };
+    // Keep the fork's VM allowance separate so upstream baseline updates merge cleanly.
+    const expected = {
+      claudeSystemAppendBytes: budget.claudeSystemAppendBytes,
+      codexAdditionalContextBytes: budget.codexAdditionalContextBytes,
+      mcpToolListJsonBytes: budget.mcpToolListJsonBytes + budget.forkMcpToolListExtraBytes,
     };
 
     expect(
       measured,
       "Set agentContextBudget.json to the measured values. Before you cut text to fit, run the evals that cover it (evals/README.md).",
-    ).toEqual(budget);
+    ).toEqual(expected);
   }).pipe(Effect.provide(layerAdvertisedTools)),
 );
