@@ -5,6 +5,26 @@ const { tmpdir } = require("node:os");
 const { join } = require("node:path");
 const test = require("node:test");
 
+test("the server shard command uses options accepted by the current cached-test runner", () => {
+  const workflow = readFileSync(join(__dirname, "../workflows/ci.yml"), "utf8");
+  const job = workflow.split("\n  test_server:\n")[1];
+  const command = job.match(/        run: >-\n((?:          .+\n)+)/)[1];
+  const args = command
+    .replace(/\$\{\{ matrix.shard \}\}/g, "1")
+    .replace(/\$\{\{ strategy.job-total \}\}/g, "8")
+    .replace(/\$\{\{ runner.temp \}\}/g, tmpdir())
+    .trim()
+    .split(/\s+/)
+    .map((part) => part.replace(/^"(.*)"$/, "$1"));
+  assert.deepEqual(args.slice(0, 3), ["vp", "run", "test:cached"]);
+  const result = spawnSync(
+    process.execPath,
+    [join(__dirname, "../../scripts/test-cached.ts"), ...args.slice(3), "--help"],
+    { encoding: "utf8" },
+  );
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+});
+
 test("compares context growth against the PR base instead of the older default branch", () => {
   const directory = mkdtempSync(join(tmpdir(), "t3-pr-budget-"));
   try {
