@@ -445,7 +445,17 @@ export const checkAcpRegistryProviderReadiness = Effect.fn(
     return yield* buildInitialAcpRegistrySnapshot(input);
   }
   const catalog = yield* AcpRegistrySupport.AcpRegistryCatalog;
-  const inspected = yield* Effect.result(catalog.inspect(input.settings, input.environment));
+  const inspected = yield* Effect.result(
+    catalog.inspect(input.settings, input.environment).pipe(
+      Effect.filterOrElse(
+        (inspection) => inspection.status !== "unprepared",
+        (inspection) =>
+          catalog
+            .prepare({ agentId: inspection.agentId })
+            .pipe(Effect.andThen(catalog.inspect(input.settings, input.environment))),
+      ),
+    ),
+  );
   const snapshot = buildCheckedAcpRegistrySnapshot({
     ...input,
     checkedAt,
@@ -649,7 +659,8 @@ export const AcpRegistryDriver: ProviderDriver<AcpRegistrySettings, AcpRegistryD
       getSettings: snapshotSettings.getSettings,
       streamSettings: snapshotSettings.streamSettings,
       haveSettingsChanged: haveProviderSnapshotSettingsChanged,
-      initialSnapshot: () => checkProvider,
+      // Downloads belong to the background readiness check, not provider construction.
+      initialSnapshot: () => buildInitialAcpRegistrySnapshot(readinessInput),
       checkProvider,
       enrichSnapshot: Effect.fn("enrichSnapshot")(function ({
         snapshot,
